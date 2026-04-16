@@ -1190,3 +1190,84 @@ Concurrent session serialization. Prerequisite for daemon safety. Prevents token
 - Per-org session paths (`~/.workrail/sessions/default/`) → adding orgId prefix later is migration
 - Feature flags on everything → merge incrementally
 - Generic webhook → all integrations (GitLab, Jira, Slack) via config, zero code per integration
+
+---
+
+### Daemon context customization (implemented Apr 15, 2026)
+
+**`~/.workrail/daemon-soul.md`** -- operator-customizable agent rules injected into every daemon session system prompt. Analogous to nexus-core's `SOUL.md` and Common-Ground's `AGENTS.md`. Default created on first run with commented instructions. Override per-workspace or globally.
+
+**Auto-inject `AGENTS.md` / `CLAUDE.md`** -- daemon scans `workspacePath` for `.claude/CLAUDE.md`, `CLAUDE.md`, `AGENTS.md`, `.github/AGENTS.md` (in priority order) and injects into system prompt under `## Workspace Context`. Combined 32KB limit, truncated with notice if over. Enables the daemon to adapt to different repos' coding standards and conventions automatically -- same as how Claude Code uses these files.
+
+**Daemon calls `start_workflow` directly** -- removes the "Call the start_workflow tool now" LLM indirection. Daemon calls `executeStartWorkflow()` directly, gets step 1, passes it as the initial prompt. More reliable, cheaper (one fewer LLM turn), and the agent starts working immediately instead of being told to call a tool.
+
+---
+
+### WorkTrain onboarding: `worktrain init` guided setup (high priority, post-MVP)
+
+**Goal:** A guided CLI onboarding that sets up everything WorkTrain needs to work well, asked once, never asked again.
+
+**What it configures (in order):**
+
+1. **LLM provider** -- Bedrock (AWS SSO profile) or direct Anthropic API key. Validates the credentials actually work before proceeding.
+2. **Workspace** -- default workspacePath for daemon sessions. Offer to auto-detect from git repos in common locations.
+3. **Daemon soul** -- create `~/.workrail/daemon-soul.md` interactively. Ask: "What language/framework does your main project use? Any coding conventions the agent should follow? Commit style?" Write the soul file from answers.
+4. **Trigger configuration** -- set up the first trigger. Ask: what workflow? (list available) what webhook source? (GitHub/GitLab/Jira/manual) Configure `triggers.yml`.
+5. **Common-Ground** -- if detected, offer to sync the team's AGENTS.md and workflows.
+6. **Notification** -- optional Slack/Telegram webhook for session completion/failure notifications.
+7. **Verification** -- fire a smoke-test workflow (cheap, non-destructive) to confirm end-to-end works. Show the result.
+
+**Design principles:**
+- Skip sections that are already configured (idempotent)
+- `--reconfigure <section>` to re-run a specific section
+- All answers stored in `~/.workrail/config.json` (already exists) + `daemon-soul.md` + `triggers.yml`
+- Should complete in under 5 minutes for a typical setup
+- The soul questionnaire is the most important part -- a well-written soul dramatically improves output quality
+
+**Longer term:** A WorkTrain hosted onboarding that teams can share via a URL (`worktrain init --from https://worktrain.io/teams/mercury-mobile`) -- imports team-specific soul, triggers, and workflow config in one command.
+
+---
+
+### Post-update onboarding: contextual feature announcements
+
+**Goal:** When WorkTrain updates to a new version with significant new capabilities, it prompts the user to configure the new feature -- once, the first time they run after updating.
+
+**How it works:**
+
+Each significant feature ships with a `migration step` keyed to a minimum version:
+```json
+// ~/.workrail/config.json
+{
+  "onboardingCompleted": "3.17.0",
+  "featureStepsCompleted": ["daemon-soul", "bedrock-setup", "triggers-v2"]
+}
+```
+
+On startup, WorkTrain checks: current version > `onboardingCompleted`? Any new `featureSteps` not in `featureStepsCompleted`? If yes, run those steps interactively before continuing.
+
+**What triggers a feature onboarding step:**
+- New capability that requires user configuration to activate (e.g. daemon soul file, Bedrock credentials, new trigger source)
+- Breaking change to config format that needs migration (e.g. triggers.yml schema v2)
+- Feature that's opt-in and valuable but off by default (e.g. AGENTS.md auto-injection)
+
+**What does NOT trigger it:**
+- Bug fixes and performance improvements
+- New workflows added to the library
+- Any change that works without user input
+
+**Tone:** Brief, useful, never annoying. Each step should take < 60 seconds. Show what changed, ask what's needed, confirm it works. Skip if already configured.
+
+**Example:**
+```
+WorkTrain updated to v4.1.0 ✦ One new capability to configure:
+
+  Workspace Context Injection
+  WorkTrain can now automatically read AGENTS.md and CLAUDE.md from
+  your repos and inject them into every agent session.
+
+  → Your workspaces will be scanned automatically. No action needed.
+  → To add custom rules for all sessions: ~/.workrail/daemon-soul.md
+     (run: workrail init --section soul)
+
+  Press Enter to continue, or 's' to skip this setup.
+```
