@@ -1527,3 +1527,42 @@ These tools use LLMs to *build* the graph -- entity extraction, relationship ide
 
 **Incremental update model:**
 After each daemon session completes, re-index only files in the handoff artifact's `filesChanged` list (structural: ts-morph re-parse; vector: re-embed changed nodes). Full rebuild only on first run or schema changes. Script, not agent.
+
+---
+
+### Polling trigger model: zero-external-config integrations (Apr 15, 2026)
+
+**Problem with webhooks:** GitLab/GitHub webhooks require admin access to the project, a publicly reachable URL, and per-project setup. Three friction points that break the freestanding, zero-config philosophy.
+
+**Solution: polling triggers.** WorkTrain polls external APIs on a schedule instead of waiting for pushes. No external system configuration required -- just a token.
+
+```yaml
+# triggers.yml example
+triggers:
+  - id: new-mrs
+    type: gitlab_poll
+    source:
+      baseUrl: https://gitlab.com
+      projectId: 12345
+      token: $GITLAB_TOKEN
+      events: [merge_request.opened, merge_request.updated]
+      pollIntervalSeconds: 60
+    workflowId: mr-review-workflow-agentic
+    goalTemplate: "Review MR !{{$.iid}}: {{$.title}}"
+    workspacePath: ~/git/my-project
+```
+
+**What to build:**
+1. `PollingTriggerSource` -- new source type alongside existing `generic` (webhook). Fields: `pollIntervalSeconds`, `token`, `baseUrl`, `projectId`, `events`.
+2. `PolledEventStore` -- lightweight local state file (`~/.workrail/polled-events.json`) tracking which event IDs have been processed. Prevents re-firing after restart.
+3. Polling scheduler in the daemon -- calls `TriggerRouter.dispatch()` directly when a new event is detected. Clean integration, no new routing plumbing.
+
+**Generalizes to all sources without external config:**
+- GitHub: poll `/repos/:owner/:repo/pulls`
+- Jira: poll `/rest/api/3/search?jql=...`
+- Linear: poll GraphQL for new issues
+- Slack: poll conversations for pattern matches
+
+**This is the preferred trigger model for external integrations.** Webhooks remain available for high-volume or latency-sensitive use cases, but polling is the default for everything else -- it works behind firewalls, requires no admin access, and fits `worktrain init` naturally (just ask for a token).
+
+**Tradeoff:** up to `pollIntervalSeconds` latency (60s default). Acceptable for MR reviews and most agentic tasks. Not acceptable for real-time chat bots.
