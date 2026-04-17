@@ -3925,3 +3925,107 @@ More critically: if a session is restarted by the daemon but then stalls (Bedroc
 3. **Orphaned session cleanup should be user-facing.** `worktrain cleanup` or `worktrain status` should surface orphaned sessions with their age and offer to clear them. Right now they silently accumulate.
 
 4. **Better logging when runWorkflow() swallows errors.** The `void runWorkflow(...)` pattern in `console-routes.ts` and `trigger-router.ts` drops errors silently. Every path that ends in silence (no log, no session advance, no error) should at minimum log `[WorkflowRunner] Session died silently` with the session ID.
+
+---
+
+### Observability and logging as first-class citizens (Apr 17, 2026)
+
+**The principle:** WorkTrain should never be a black box. Every action, decision, failure, and state transition should be traceable after the fact -- by a human, by another agent, or by a coordinator script. Logging and observability are not afterthoughts; they are core infrastructure.
+
+**What "first-class" means:**
+
+1. **Structured, not prose.** Every log line should be machine-parseable. Use consistent prefixes (`[WorkflowRunner]`, `[TriggerRouter]`, `[DaemonConsole]`), consistent key=value pairs, and structured JSON for rich payloads. No freeform strings that require regex to parse.
+
+2. **Levels matter.** INFO for normal operations, WARN for recoverable anomalies, ERROR for failures that need attention. Silence = actively working, not unknown. A session that produces no logs for 5+ minutes should emit a heartbeat.
+
+3. **Every state transition logged.** Session start, step advance, tool call, tool result (including errors), session end (success/timeout/error). No silent gaps. The daemon observability logs (#442) are a start -- extend this everywhere.
+
+4. **Errors always include context.** Not just the message -- which session, which tool, which step, which trigger, how long it had been running, what the last successful action was. Enough to diagnose without re-running.
+
+5. **Correlation IDs.** Every session has a `sessionId`. Every tool call has a `toolCallId`. Log entries should include the relevant ID so you can filter across a full session's history. Today the daemon logs include `sessionId` -- extend this to trigger IDs, workflow IDs, and step IDs.
+
+6. **Log destinations are configurable.** Today: stdout → daemon.log file via redirect. Long-term: structured JSON to a log aggregator (Datadog, CloudWatch, file), separate log files per workspace, log rotation. The daemon should accept a `--log-level` flag and a `--log-format json|human` flag.
+
+7. **The session store IS the audit log.** Every `advance_recorded`, `node_output_appended`, `validation_performed` event is a durable structured record. The session store should be queryable as a post-mortem tool. `worktrain session logs <id>` should reconstruct the full story of what happened.
+
+**Specific gaps to close:**
+
+- `continue_workflow` tool: log the step ID and notes length being submitted, not just "continue_workflow called"
+- `makeBashTool`: log exit code and output length in addition to the command
+- `makeReadTool` / `makeWriteTool`: log file path and bytes
+- `AgentLoop`: log each LLM turn (turn number, stop reason, tool count) -- today nothing is logged between tool calls
+- `TriggerRouter`: log when a session is queued (semaphore at capacity) and when it dequeues
+- `PollingScheduler`: log each poll cycle result (N events found, N new, N dispatched)
+- `DeliveryClient`: log delivery attempt, HTTP status, response time
+- `DaemonConsole`: log when the console HTTP server starts, stops, or fails a request
+
+**The `worktrain logs` command:**
+```bash
+worktrain logs                          # tail daemon.log
+worktrain logs --session sess_abc123    # replay full session from event store
+worktrain logs --trigger test-task      # all sessions for this trigger
+worktrain logs --level error            # only errors across all sources
+worktrain logs --since 1h               # last hour
+worktrain logs --format json            # machine-readable output
+```
+
+**Self-healing dependency:** The automatic gap detection, WORKTRAIN_STUCK routing, and coordinator self-healing patterns all depend on logs being structured and complete. You can't auto-fix what you can't observe. Logging quality is a prerequisite for autonomous operation at scale.
+
+---
+
+### Event sourcing for orchestration: extend the session store to daemon and coordinator events (Apr 17, 2026)
+
+**The decision:** extend the existing WorkRail event store infrastructure to cover orchestration-level events, not build a separate system. The session store is already append-only, crash-safe, content-addressed, and queryable -- rebuilding those properties would be wasteful.
+
+**The model: multiple event streams, same infrastructure**
+
+```
+~/.workrail/events/
+  sessions/          ← already exists (per-session workflow events)
+  daemon/            ← new: lifecycle, triggers, delivery, errors
+  triggers/          ← new: per-trigger poll history and outcomes
+  coordinator/       ← future: coordinator script decisions and routing
+```
+
+Each stream is append-only JSONL with the same segment/manifest pattern as the session store. The `worktrain logs` command queries across streams. Watchdog and coordinator scripts subscribe to streams.
+
+**Daemon event stream: what gets recorded**
+
+Every significant daemon action becomes a structured event:
+
+```jsonl
+{"ts":"2026-04-17T...","kind":"daemon_started","port":3200,"workspacePath":"...","version":"3.31.0"}
+{"ts":"...","kind":"trigger_fired","triggerId":"test-task","workflowId":"coding-task-workflow-agentic"}
+{"ts":"...","kind":"session_queued","sessionId":"sess_abc","triggerId":"test-task","queueDepth":0}
+{"ts":"...","kind":"session_started","sessionId":"sess_abc","workflowId":"coding-task-workflow-agentic","modelId":"..."}
+{"ts":"...","kind":"tool_called","sessionId":"sess_abc","tool":"Bash","command":"ls docs/ | grep trigger"}
+{"ts":"...","kind":"tool_error","sessionId":"sess_abc","tool":"Bash","error":"exit 1","isError":true}
+{"ts":"...","kind":"step_advanced","sessionId":"sess_abc","stepId":"phase-0-triage-and-mode","advance":1}
+{"ts":"...","kind":"session_completed","sessionId":"sess_abc","stopReason":"stop","durationMs":1847000}
+{"ts":"...","kind":"delivery_attempted","sessionId":"sess_abc","callbackUrl":"https://...","status":200}
+{"ts":"...","kind":"poll_cycle","triggerId":"pr-review","eventsFound":3,"newEvents":1,"dispatched":1}
+```
+
+**`DaemonEventEmitter`:** thin wrapper around the event store, called from TriggerRouter, workflow-runner, delivery-client, and polling-scheduler. Each call appends one event to `~/.workrail/events/daemon/YYYY-MM-DD.jsonl`. Zero overhead when nothing is listening.
+
+**`worktrain logs` CLI:** reads from both session store and daemon event stream, correlates by `sessionId`, presents a unified timeline:
+
+```
+worktrain logs                          # tail current daemon events
+worktrain logs --session sess_abc123    # full timeline: trigger → steps → delivery
+worktrain logs --trigger test-task      # all sessions for this trigger  
+worktrain logs --level error            # only errors across all streams
+worktrain logs --since 1h               # last hour of activity
+worktrain logs --format json            # machine-readable for scripts
+```
+
+**SSE extension:** the console already streams session events via SSE. Extend to also stream daemon events so the console live feed shows everything: trigger fires, tool calls, delivery attempts, errors -- not just step advances. This is the "more than just the DAG" console improvement.
+
+**Why this matters for self-healing:** The coordinator self-healing pattern requires the coordinator to observe what happened. Today it reads `lastStepNotes` and session store snapshots -- both batch reads after the fact. With a subscribable daemon event stream, the coordinator can react in real time: "tool_error event for session X → spawn diagnostic sub-session now" rather than "check for WORKTRAIN_STUCK markers after the fact."
+
+**Build order:**
+1. `DaemonEventEmitter` + daemon event stream file (append-only JSONL, no fancy infra needed to start)
+2. Wire emitter calls into TriggerRouter, workflow-runner, delivery-client
+3. `worktrain logs` CLI commands (reads files, correlates by sessionId)
+4. SSE extension in DaemonConsole for live event streaming
+5. Coordinator script subscription to event streams (replaces polling session store)
