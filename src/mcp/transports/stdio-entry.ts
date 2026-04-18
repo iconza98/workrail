@@ -9,6 +9,7 @@ import { composeServer } from '../server.js';
 import { wireShutdownHooks, wireStdinShutdown, wireStdoutShutdown } from './shutdown-hooks.js';
 import { registerFatalHandlers, logStartup, registerGracefulShutdown } from './fatal-exit.js';
 import { writeTombstone, clearTombstone } from './primary-tombstone.js';
+import { logBridgeEvent } from './bridge-events.js';
 
 const INITIAL_ROOTS_TIMEOUT_MS = 1000;
 
@@ -33,6 +34,9 @@ export async function startStdioServer(): Promise<void> {
   // cleanly rather than spinning in an infinite loop. See fatal-exit.ts.
   registerFatalHandlers('stdio');
   logStartup('stdio');
+  // Log primary server startup to bridge.log so crash forensics can correlate
+  // primary restarts with bridge reconnect storms in the same log stream.
+  logBridgeEvent({ kind: 'primary_started', transport: 'stdio' });
 
   // Clear any tombstone left by the previous run. If a previous primary died
   // cleanly and wrote a tombstone, bridges may be in slow-poll mode waiting
@@ -59,9 +63,9 @@ export async function startStdioServer(): Promise<void> {
     try {
       const result = await server.listRoots();
       rootsManager.updateRootUris(result.roots.map((r: { uri: string }) => r.uri));
-      console.error(`[Roots] Updated workspace roots: ${result.roots.map((r: { uri: string }) => r.uri).join(', ') || '(none)'}`);
+      try { process.stderr.write(`[Roots] Updated workspace roots: ${result.roots.map((r: { uri: string }) => r.uri).join(', ') || '(none)'}\n`); } catch { /* ignore */ }
     } catch {
-      console.error('[Roots] Failed to fetch updated roots after change notification');
+      try { process.stderr.write('[Roots] Failed to fetch updated roots after change notification\n'); } catch { /* ignore */ }
     }
   });
 
@@ -82,7 +86,7 @@ export async function startStdioServer(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error('[Transport] WorkRail MCP Server running on stdio');
+  try { process.stderr.write('[Transport] WorkRail MCP Server running on stdio\n'); } catch { /* ignore */ }
 
   // -------------------------------------------------------------------------
   // stdio-specific: Fetch initial workspace roots from the IDE client
@@ -90,15 +94,15 @@ export async function startStdioServer(): Promise<void> {
   void fetchInitialRootsWithTimeout(server)
     .then((result) => {
       if (result == null) {
-        console.error('[Roots] Initial roots probe timed out; workspace context will use server CWD fallback');
+        try { process.stderr.write('[Roots] Initial roots probe timed out; workspace context will use server CWD fallback\n'); } catch { /* ignore */ }
         return;
       }
 
       rootsManager.updateRootUris(result.roots.map((r: { uri: string }) => r.uri));
-      console.error(`[Roots] Initial workspace roots: ${result.roots.map((r: { uri: string }) => r.uri).join(', ') || '(none)'}`);
+      try { process.stderr.write(`[Roots] Initial workspace roots: ${result.roots.map((r: { uri: string }) => r.uri).join(', ') || '(none)'}\n`); } catch { /* ignore */ }
     })
     .catch(() => {
-      console.error('[Roots] Client does not support roots/list; workspace context will use server CWD fallback');
+      try { process.stderr.write('[Roots] Client does not support roots/list; workspace context will use server CWD fallback\n'); } catch { /* ignore */ }
     });
 
   // -------------------------------------------------------------------------
