@@ -4390,3 +4390,57 @@ The existing `DaemonEventEmitter` (written in #498) writes to a separate daily l
 ### FatalToolError: distinguish recoverable from non-recoverable tool failures (follow-up from PR #523)
 The blanket try/catch in AgentLoop._executeTools() converts ALL tool throws to isError tool_results. This is correct for Bash/Read/Write (LLM can see and retry), but potentially wrong for continue_workflow failures (LLM retrying with a broken token loops). The discovery agent proposed a FatalToolError subclass: tools throw FatalToolError for non-recoverable errors (session corruption, bad tokens), plain Error for recoverable failures. _executeTools catches plain Error and returns isError; FatalToolError propagates and kills the session. Combined with the DEFAULT_MAX_TURNS cap (PR followup), this provides defense-in-depth.
 5. Deprecate `DaemonEventEmitter` once console reads from session events
+
+---
+
+### Worktree lifecycle management: automatic cleanup and inventory (Apr 18, 2026)
+
+**The problem:** every WorkTrain agent that uses `--isolation worktree` leaves a worktree on disk after completion. With 10 concurrent agents running all day, this accumulated to 69 worktrees in `.claude/worktrees/`, triggering hundreds of simultaneous `git status` processes that saturated the CPU.
+
+**What's needed:**
+
+1. **Automatic cleanup on session end** -- when a WorkTrain session completes (success or failure), the daemon automatically runs `git worktree remove <path> --force` for the session's worktree. If the branch is already merged to main, also delete the local branch ref.
+
+2. **Startup pruning** -- `workrail daemon` startup runs `git worktree prune` in each configured workspace before starting the trigger listener.
+
+3. **`worktrain worktree list`** -- shows all WorkTrain-managed worktrees: path, branch, session ID, age, whether the branch is merged.
+
+4. **`worktrain worktree clean`** -- removes all worktrees whose branches are merged to main, or older than N days. Dry-run mode by default.
+
+5. **`worktrain worktree status`** -- summary: how many worktrees, total disk usage, any stale ones.
+
+6. **Never use main as a worktree** (already in backlog) -- enforced at worktree creation time, not just as a rule.
+
+**Root cause of the CPU spike:** 69 worktrees × repeated `git status --short` from tools/IDE plugins = hundreds of concurrent git processes. Each `git status` on a large repo with many untracked files is CPU-intensive.
+
+**Mitigation already in place:** `--isolation worktree` creates branches named `worktree-agent-<id>` -- these are identifiable and bulk-deletable. The daemon's `runStartupRecovery()` could also prune them.
+
+**Build order:** startup pruning (trivial, high value) → automatic cleanup on session end → `worktrain worktree` CLI commands.
+
+---
+
+### Simplify MCP server: remove primary election, bridge, and HTTP serving (architectural cleanup)
+
+**The core insight:** the bridge/primary-election system exists solely to solve "only one process should serve the console UI on port 3456." Now that `worktrain console` is a standalone file-watching binary (PR #512), that problem is already solved. The entire bridge/election system can be removed.
+
+**What "allow multiple MCP processes" means in practice:**
+- Each Claude Code window gets its own MCP server -- no port contention, no primary election, no bridge reconnect cycles
+- MCP server becomes pure stdio: starts, handles tools, exits. Nothing async needs to write after the pipe closes -- EPIPE is irrelevant.
+- Session store is append-only JSONL per-session -- multiple processes writing different sessions cannot corrupt each other
+- `worktrain console` aggregates all sessions from the file store regardless of how many MCP servers ran
+
+**What to remove:**
+- `DashboardLock` / `tryBecomePrimary()` / `bindWithPortFallback()` -- the entire primary election system
+- `bridge-entry.ts` -- the bridge, spawn storm, and reconnect drama are gone
+- `HttpServer` starting as part of the MCP server -- console owns HTTP, not MCP
+
+**What remains for the MCP server:** pure stdio MCP protocol + session engine. No HTTP, no port binding, no lock files. Starts instantly, exits cleanly.
+
+**Why this is safe:**
+- Tokens are session-scoped UUIDs -- two servers cannot share a session
+- Append-only JSONL has no exclusive file locks
+- ~50MB per process × 3 Claude Code windows = 150MB -- acceptable
+
+**The bridge complexity was always a band-aid.** It was the right solution when the MCP server also owned the console UI. With the standalone console, the band-aid can come off and the system becomes dramatically simpler and more reliable.
+
+**Build order:** extract `worktrain console` fully (done) → remove HttpServer from MCP startup → remove bridge → remove DashboardLock/primary election → MCP server is pure stdio.
