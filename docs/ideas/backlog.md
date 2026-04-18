@@ -4975,3 +4975,174 @@ Long-term (when mobile exists):
 ```
 
 **Build order:** outbox.jsonl integration (foundation, works everywhere) → generic webhook (covers Slack/Discord/Teams/anything) → platform notifications (macOS/Linux/Windows) → mobile app push (when mobile exists).
+
+---
+
+## 🎉 WorkTrain first confirmed end-to-end autonomous session (Apr 18, 2026)
+
+**Timestamp:** 2026-04-18T15:09:49Z  
+**Commit:** `473f4bd0` (main)  
+**npm version:** v3.34.1 (published, installable by anyone)  
+**What happened:** A real MR review workflow (`mr-review-workflow-agentic`) ran completely autonomously via webhook trigger, advanced through all phases (context gathering, review, synthesis, validation, handoff), self-validated, and produced a structured finding set. 8 step advances, `outcome: success`.
+
+**Trigger:** `POST /webhook/mr-review {"goal": "Review PR #566: fix two minor bugs..."}`  
+**Session:** `sess_3bmjuzf7l2vrqynjtleg5iskm4`  
+**Result:** APPROVE with High confidence. 3 Minor findings, 1 Informational. Correctly decided not to delegate since no Critical/Major issues.
+
+---
+
+### What works at this commit
+
+- ✅ Daemon accepts webhooks, starts sessions, runs workflows end-to-end
+- ✅ Sessions advance through all workflow phases autonomously
+- ✅ `mr-review-workflow-agentic` v2.6 runs fully -- context gathering, review phases, synthesis loop, validation, handoff
+- ✅ `wr.discovery` v3.2.0 runs fully -- with new phase-0-reframe (goal reframing before research)
+- ✅ Console shows live sessions via event log (no daemon connection required)
+- ✅ MCP server is stable (bridge removed, EPIPE fixed, v3.34.1 published)
+- ✅ GitHub + GitLab polling triggers (no webhooks needed)
+- ✅ `worktrain init`, `tell`, `inbox`, `spawn`, `await` CLI commands
+- ✅ Stuck detection + visibility (`worktrain status`, `worktrain logs --follow`)
+- ✅ `complete_step` tool -- daemon manages continueToken, LLM never handles it
+- ✅ Assessment gate circuit breaker (stops at 3 blocked attempts, shows artifact format)
+- ✅ `worktrain daemon --install` creates launchd service (daemon survives MCP reconnects)
+- ✅ Self-configuration (`triggers.yml`, `daemon-soul.md`, `AGENTS.md` for workrail repo)
+
+### Current limitations at this commit
+
+**Blocking reliable complex workflows:**
+1. **`complete_step` not yet tested in production** -- just merged, daemon still using `continue_workflow` in running sessions. Needs daemon restart to take effect.
+2. **Assessment gates still unreliable** -- `complete_step` fixes the token issue; the `artifacts` field (#557) fixes the submission issue. But `coding-task-workflow-agentic` phases with quality gates haven't been tested end-to-end yet.
+3. **Native `spawn_agent` not yet merged** -- implementation in progress. Until it lands, all subagent delegation is via `mcp__nested-subagent__Task` (invisible black box).
+4. **No session identity (parentSessionId)** -- multi-phase work appears as unrelated flat sessions in the console.
+
+**Architecture not yet realized:**
+5. **Coordinator scripts don't exist** -- `worktrain spawn/await` is there but no templates.
+6. **Subagent loop not rethought** -- LLM still decides when to delegate; workflow-as-orchestrator model is spec'd but not built.
+7. **Workflow runtime adapter not built** -- workflows run in daemon mode as-is; no MCP vs daemon adaptation layer.
+8. **Knowledge graph not built** -- context gathering still sweeps files on every session.
+9. **MCP simplification PR-B not done** -- HttpServer still starts with MCP server.
+
+**Missing for production autonomy:**
+10. **No notifications** -- daemon completes work silently. Users have no awareness unless watching console/logs.
+11. **No auto-commit from handoff artifact** -- merged but untested end-to-end.
+12. **Late-bound goals not implemented** -- triggers require static goals; dynamic goals (like PR reviews) need `goalTemplate: "{{$.goal}}"` as default.
+13. **No coordinator script template** -- the multi-phase autonomous pipeline exists as primitives but not as a usable script.
+
+---
+
+### Artifacts as first-class citizens: explorable, accessible, out of the repo (Apr 18, 2026)
+
+**The current mess:** every autonomous session dumps `design-candidates.md`, `implementation_plan.md`, `design-review-findings.md`, `mr-review.md` etc. as files in the repo root or worktrees. They are:
+- Not indexed or searchable
+- Not visible in the console
+- Not accessible to other sessions (agent B can't read agent A's handoff without knowing the exact file path)
+- Polluting the repo with ephemeral working documents
+- Lost when worktrees are cleaned up
+- Scattered across the filesystem with no structure
+
+**The right model:** artifacts are WorkTrain data, not filesystem files.
+
+---
+
+#### What an artifact is
+
+Any structured output from a session that has value beyond the session itself:
+- **Handoff docs** -- what one session produces for the next to consume
+- **Design candidates** -- research output with tradeoffs and recommendation
+- **Implementation plans** -- what to build, how, in what order
+- **Review findings** -- MR review output with findings, severity, recommendation
+- **Spec files** -- behavioral specs, acceptance criteria, API contracts
+- **Investigation summaries** -- bug investigation root cause and reproduction
+- **Context bundles** -- pre-packaged knowledge for subagent consumption
+
+**NOT artifacts:** step notes (stay in WorkRail session store), event logs (stay in daemon events), source code (stays in repo).
+
+---
+
+#### Where artifacts live
+
+`~/.workrail/artifacts/<sessionId>/<artifact-type>-<timestamp>.json`
+
+Structured JSON, not markdown. The display layer (console, `worktrain artifacts`) renders them as human-readable. Other agents query them as structured data.
+
+**Why JSON not markdown:**
+- Queryable by other agents (what are the findings with severity=critical?)
+- Renderable by the console with proper formatting, filtering, search
+- Versionable and diffable in the artifact store
+- Accessible via the knowledge graph (artifacts become nodes with typed edges)
+
+---
+
+#### Console integration
+
+The console session detail view gets an "Artifacts" tab alongside "Steps" and "Notes":
+
+```
+Session: sess_3bmj...  [MR Review: PR #566]
+├── Steps (8)
+├── Notes
+└── Artifacts (3)
+    ├── 📋 review-findings.json    "APPROVE -- 3 Minor, 1 Info"
+    ├── 📄 context-bundle.json     "12 files read, 4 patterns identified"  
+    └── 🔍 investigation-notes.json "Signal 3 dead code in max_turns path"
+```
+
+Click an artifact → full rendered view in the console.
+
+---
+
+#### Accessibility to other agents
+
+Agents can query artifacts from prior sessions via a new tool:
+
+```
+read_artifact({ sessionId: 'sess_3bmj...', type: 'review-findings' })
+→ { verdict: 'APPROVE', findings: [...], recommendation: '...' }
+
+search_artifacts({ type: 'implementation-plan', workflowId: 'coding-task-workflow-agentic', since: '7d' })
+→ [{ sessionId, summary, createdAt }, ...]
+```
+
+This replaces the current pattern where agents `cat design-candidates.md` from a known path -- fragile, path-dependent, breaks across worktrees.
+
+---
+
+#### Workflow integration
+
+Workflow steps declare their artifact output type:
+
+```json
+{
+  "id": "phase-1c-challenge-and-select",
+  "output": {
+    "artifact": "design-candidates",
+    "schema": "wr.artifacts.design-candidates.v1"
+  }
+}
+```
+
+The daemon automatically stores the step's notes as a typed artifact. Other steps and other sessions can query it by type rather than by file path.
+
+---
+
+#### What stays in the repo
+
+Almost nothing from WorkTrain sessions. The only things that belong in the repo:
+- Source code changes (committed via auto-commit or human review)
+- Long-lived spec files that are part of the product (e.g. `docs/ideas/backlog.md`)
+- Workflow definitions (`workflows/*.json`)
+
+Everything else -- design docs, review findings, investigation notes, implementation plans -- lives in `~/.workrail/artifacts/`. If you want a design doc in the repo, you explicitly commit it. The default is: it lives in WorkTrain's data layer.
+
+---
+
+#### Build order
+
+1. **Artifact store** -- `~/.workrail/artifacts/<sessionId>/` directory structure, JSON schema for common types
+2. **Daemon writes artifacts** -- workflow steps with `output.artifact` declaration write to the artifact store automatically
+3. **`worktrain artifacts` CLI** -- list, read, search artifacts by session, type, date
+4. **Console artifacts tab** -- render artifacts in session detail view
+5. **`read_artifact` / `search_artifacts` tools** -- agents can query the artifact store
+6. **Knowledge graph integration** -- artifacts become nodes, sessions link to their artifacts
+
+**The `NEVER COMMIT MARKDOWN FILES` rule in metaGuidance is a symptom of this missing feature.** The rule exists because agents keep dumping files in the wrong place. With a proper artifact store, the rule becomes unnecessary -- artifacts have nowhere to go except the artifact store.
