@@ -418,6 +418,7 @@ program
             triggerRouter: handle.router,
             serverVersion: pkg.version,
             workflowService,
+            steerRegistry: handle.steerRegistry,
           });
 
           let consoleHandle: import('./trigger/daemon-console.js').DaemonConsoleHandle | null = null;
@@ -1190,6 +1191,19 @@ runCommand
       writeFile: async (filePath: string, content: string) => {
         await fs.promises.writeFile(filePath, content, 'utf-8');
       },
+
+      readFile: (filePath: string) => fs.promises.readFile(filePath, 'utf-8'),
+
+      appendFile: (filePath: string, content: string) =>
+        fs.promises.appendFile(filePath, content, 'utf-8'),
+
+      mkdir: (dirPath: string, opts: { recursive: boolean }) =>
+        fs.promises.mkdir(dirPath, opts),
+
+      homedir: os.homedir,
+      joinPath: path.join,
+      nowIso: () => new Date().toISOString(),
+      generateId: () => randomUUID(),
 
       stderr: (line: string) => process.stderr.write(line + '\n'),
       now: () => Date.now(),
