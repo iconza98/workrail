@@ -23,6 +23,7 @@ import type { TriggerRouter } from '../../trigger/trigger-router.js';
 import type { V2ToolContext } from '../../mcp/types.js';
 import type { SteerRegistry } from '../../daemon/workflow-runner.js';
 import { runWorkflow } from '../../daemon/workflow-runner.js';
+import { assertNever } from '../../runtime/assert-never.js';
 import { executeStartWorkflow } from '../../mcp/handlers/v2-execution/start.js';
 import { parseContinueTokenOrFail } from '../../mcp/handlers/v2-token-ops.js';
 
@@ -872,8 +873,6 @@ export function mountConsoleRoutes(
       ).then((result) => {
         if (result._tag === 'success') {
           console.log(`[ConsoleRoutes] Auto dispatch completed: workflowId=${workflowId} stopReason=${result.stopReason}`);
-        } else if (result._tag === 'timeout') {
-          console.log(`[ConsoleRoutes] Auto dispatch timed out: workflowId=${workflowId}`);
         } else if (result._tag === 'delivery_failed') {
           // delivery_failed not expected here -- this path has no callbackUrl.
           // Handled to keep the union exhaustive after WorkflowRunResult was widened (GAP-3).
@@ -882,9 +881,15 @@ export function mountConsoleRoutes(
           // with makeSpawnAgentTool, which uses assertNever because the outcome is returned to the
           // parent LLM and silently mapping delivery_failed to success would corrupt the session.
           console.log(`[ConsoleRoutes] Auto dispatch delivery failed: workflowId=${workflowId}`);
-        } else {
-          // result._tag === 'error'
+        } else if (result._tag === 'timeout') {
+          console.log(`[ConsoleRoutes] Auto dispatch timed out: workflowId=${workflowId}`);
+        } else if (result._tag === 'error') {
           console.log(`[ConsoleRoutes] Auto dispatch failed: workflowId=${workflowId} error=${result.message}`);
+        } else {
+          // Compile-time exhaustiveness guard. If WorkflowRunResult gains a new variant
+          // this will fail to compile, forcing the developer to handle the new case.
+          // At runtime this is unreachable -- all current variants are handled above.
+          assertNever(result);
         }
       });
     }
