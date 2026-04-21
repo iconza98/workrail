@@ -624,8 +624,13 @@ export function mountConsoleRoutes(
       }
       const repoRoots = cachedRepoRoots;
 
+      // WHY clearTimeout in .finally(): cancels the timer as soon as the work
+      // finishes. Idiomatic pattern -- earlier cancellation, less timer overhead,
+      // and prevents the timeout reject from firing after the race settles.
       const data = await Promise.race([
-        getWorktreeList(repoRoots, activeSessions),
+        getWorktreeList(repoRoots, activeSessions).finally(() => {
+          if (timeoutId !== null) clearTimeout(timeoutId);
+        }),
         timeoutPromise,
       ]);
       if (timeoutId !== null) clearTimeout(timeoutId);
