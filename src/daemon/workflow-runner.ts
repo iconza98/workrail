@@ -332,6 +332,12 @@ export interface WorkflowTrigger {
      */
     readonly maxTurns?: number;
     /**
+     * Maximum number of output tokens allowed in a single LLM response.
+     * See TriggerDefinition.agentConfig.maxOutputTokens for full documentation.
+     * Default: 8192 (AgentLoop built-in, applied when field is absent).
+     */
+    readonly maxOutputTokens?: number;
+    /**
      * Maximum spawn depth for nested spawn_agent calls.
      * Root sessions have depth 0. Each child adds 1. When a session's depth reaches
      * this limit, spawn_agent returns a typed error without spawning.
@@ -2491,6 +2497,7 @@ export function makeSpawnAgentTool(
       'Use this when a step requires delegating a well-defined sub-task to a separate workflow. ' +
       'IMPORTANT: The parent session\'s time limit (maxSessionMinutes) keeps ticking while the child runs. ' +
       'Configure the parent with enough time to cover both its own work and the child\'s work. ' +
+      'Per-trigger limits (maxOutputTokens, maxTurns, maxSessionMinutes) are NOT inherited by child sessions spawned via spawn_agent -- each child uses its own trigger\'s agentConfig. ' +
       'Returns: { childSessionId, outcome: "success"|"error"|"timeout", notes: string, artifacts?: readonly unknown[] }. ' +
       'On success, artifacts contains the child session\'s final step artifacts if any were produced. ' +
       'Check outcome before using notes -- on error/timeout, notes contains the error message.',
@@ -3874,6 +3881,12 @@ export async function runWorkflow(
     // on the next step. Workflow tools have ordering requirements.
     toolExecution: 'sequential',
     callbacks: agentCallbacks,
+    // WHY: per-trigger token ceiling configured in agentConfig.maxOutputTokens.
+    // When absent, AgentLoop defaults to 8192 (unchanged behavior).
+    // The value is passed through as-is; the Anthropic API enforces model-specific limits.
+    ...(trigger.agentConfig?.maxOutputTokens !== undefined
+      ? { maxTokens: trigger.agentConfig.maxOutputTokens }
+      : {}),
   });
 
   // ---- Session limits (wall-clock timeout + max-turn limit) ----
