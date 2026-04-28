@@ -49,19 +49,28 @@ const LAUNCHD_LABEL = 'io.worktrain.daemon';
 const PLIST_FILENAME = `${LAUNCHD_LABEL}.plist`;
 
 /**
- * Env vars captured from the current process at install time.
+ * Non-secret env vars captured from the current process into the plist.
  *
- * WHY a fixed list: we do not want to snapshot the full process.env into the
- * plist (that would capture unrelated secrets). Only the vars that the daemon
- * actually reads are included.
+ * WHY a fixed allowlist: we do not snapshot all of process.env -- that would
+ * bake unrelated secrets into a file that persists on disk indefinitely.
+ *
+ * WHY secrets are excluded: API keys and tokens must NOT be baked into the
+ * plist. The plist is stored at ~/Library/LaunchAgents/ (mode 600) but
+ * persists across machine backups, Time Machine, etc. Instead, put secrets in
+ * ~/.workrail/.env -- the daemon loads that file at startup via loadDaemonEnv().
+ *
+ * Secrets to put in ~/.workrail/.env (NOT in the plist):
+ *   ANTHROPIC_API_KEY=sk-ant-...
+ *   GITHUB_TOKEN=ghp_...
+ *   GITLAB_TOKEN=glpat-...
+ *   AWS_ACCESS_KEY_ID=...
+ *   AWS_SECRET_ACCESS_KEY=...
+ *   AWS_SESSION_TOKEN=...
+ *   WORKTRAIN_BOT_TOKEN=...
  */
 const CAPTURED_ENV_VARS = [
-  // LLM credentials (one of these is required at daemon start time)
+  // AWS profile name only (not the actual credentials -- those go in ~/.workrail/.env)
   'AWS_PROFILE',
-  'AWS_ACCESS_KEY_ID',
-  'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN',
-  'ANTHROPIC_API_KEY',
 
   // Daemon feature flags
   'WORKRAIL_TRIGGERS_ENABLED',
@@ -69,10 +78,6 @@ const CAPTURED_ENV_VARS = [
   // Workspace default (also readable from config.json, but plist wins for
   // daemons that start before any user shell is active)
   'WORKRAIL_DEFAULT_WORKSPACE',
-
-  // SCM tokens for polling triggers
-  'GITHUB_TOKEN',
-  'GITLAB_TOKEN',
 
   // Node.js / shell basics needed by the daemon process
   'HOME',
@@ -146,12 +151,19 @@ export interface WorktrainDaemonCommandDeps {
 }
 
 export interface WorktrainDaemonCommandOpts {
-  /** Create and load the launchd service. Mutually exclusive with uninstall/status. */
+  /** Create and load the launchd service. Mutually exclusive with other flags. */
   readonly install?: boolean;
-  /** Unload and remove the launchd service. Mutually exclusive with install/status. */
+  /** Unload and remove the launchd service. Mutually exclusive with other flags. */
   readonly uninstall?: boolean;
-  /** Report the current service status. Mutually exclusive with install/uninstall. */
+  /** Report the current service status. Mutually exclusive with other flags. */
   readonly status?: boolean;
+  /**
+   * Start the daemon via launchctl (service must be installed first).
+   * Does NOT auto-start on login -- operator must explicitly call this.
+   */
+  readonly start?: boolean;
+  /** Stop the running daemon via launchctl. Does not uninstall the service. */
+  readonly stop?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -161,9 +173,15 @@ export interface WorktrainDaemonCommandOpts {
 /**
  * Build the launchd plist XML for the WorkTrain daemon.
  *
- * WHY RunAtLoad + KeepAlive: RunAtLoad starts the daemon immediately when
- * launchctl loads the plist. KeepAlive restarts it automatically if it exits
- * unexpectedly, providing crash recovery without manual intervention.
+ * WHY no RunAtLoad or KeepAlive: the daemon must be started explicitly by the
+ * operator (`worktrain daemon --start`). Auto-starting at login and auto-restarting
+ * on crash means WorkTrain autonomously works in your repos without any deliberate
+ * operator action -- which is unsafe, especially when the daemon has bugs or the
+ * operator hasn't reviewed what triggers are configured. The operator decides when
+ * WorkTrain runs; launchd just provides the process management scaffolding.
+ *
+ * To start the daemon: `worktrain daemon --start`
+ * To stop the daemon:  `worktrain daemon --stop`
  *
  * WHY WorkingDirectory is set to homedir: without it launchd sets cwd to '/'.
  * The daemon falls back to process.cwd() when WORKRAIL_DEFAULT_WORKSPACE is
@@ -217,20 +235,16 @@ ${envEntries}
   <key>StandardErrorPath</key>
   <string>${escapeXml(stderrLog)}</string>
 
-  <key>RunAtLoad</key>
-  <true/>
-
-  <key>KeepAlive</key>
-  <true/>
-
   <!--
-    ThrottleInterval: minimum seconds between launchd restarts.
-    WHY 30s: prevents launchd from spinning in a tight restart loop if the daemon
-    exits immediately (e.g., missing credentials or invalid workspace path).
-    Without this, a misconfigured service consumes CPU and spams logs.
+    No RunAtLoad or KeepAlive: the daemon must be started explicitly with
+    'worktrain daemon --start'. Auto-starting at login and auto-restarting
+    on crash is unsafe -- WorkTrain acts autonomously in your repos and the
+    operator must decide when it runs.
+
+    To start:  worktrain daemon --start
+    To stop:   worktrain daemon --stop
+    To status: worktrain daemon --status
   -->
-  <key>ThrottleInterval</key>
-  <integer>30</integer>
 </dict>
 </plist>
 `;
@@ -328,25 +342,8 @@ async function runInstall(
   const plistPath = deps.joinPath(plistDir, PLIST_FILENAME);
   const logDir = deps.joinPath(home, '.workrail', 'logs');
 
-  // Validate that at least one LLM credential is available.
   const env = deps.env;
-  const hasBedrock = !!(env['AWS_PROFILE'] || env['AWS_ACCESS_KEY_ID']);
-  const hasAnthropic = !!env['ANTHROPIC_API_KEY'];
-  if (!hasBedrock && !hasAnthropic) {
-    return failure(
-      'No LLM credentials found in the current environment. ' +
-      'Set AWS_PROFILE (for Bedrock) or ANTHROPIC_API_KEY (for Anthropic) ' +
-      'before running --install so the daemon can authenticate.',
-      {
-        suggestions: [
-          'export AWS_PROFILE=your-sso-profile',
-          'export ANTHROPIC_API_KEY=sk-ant-...',
-        ],
-      },
-    );
-  }
-
-  deps.print('Installing WorkTrain daemon as a launchd service...');
+  deps.print('Registering WorkTrain daemon with launchd...');
 
   // Step 1: Create required directories.
   await deps.mkdir(plistDir, { recursive: true });
@@ -401,21 +398,31 @@ async function runInstall(
   }
 
   deps.print('');
-  if (status.running) {
-    deps.print(`WorkTrain daemon installed and running (PID ${status.pid}).`);
-  } else {
-    deps.print(`WorkTrain daemon installed. Service loaded but not yet running.`);
-    deps.print(`This may be normal if WORKRAIL_TRIGGERS_ENABLED was not set.`);
-  }
+  deps.print('WorkTrain daemon registered with launchd.');
+  deps.print('');
+  deps.print('Before starting, put your secrets in ~/.workrail/.env');
+  deps.print('(see docs/configuration.md for the full list):');
+  deps.print('');
+  deps.print('  ANTHROPIC_API_KEY=sk-ant-...');
+  deps.print('  # or for AWS Bedrock: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY');
+  deps.print('  GITHUB_TOKEN=ghp_...          # for GitHub polling triggers');
+  deps.print('  WORKTRAIN_BOT_TOKEN=ghp_...   # for self-improvement queue');
+  deps.print('');
+  deps.print('Then start the daemon:');
+  deps.print('');
+  deps.print('  worktrain daemon --start     Start the daemon now');
+  deps.print('  worktrain daemon --stop      Stop the daemon');
+  deps.print('  worktrain daemon --status    Check if running');
+  deps.print('  worktrain daemon --uninstall Remove the registration');
+  deps.print('');
   deps.print(`Logs: ${logDir}/daemon.stdout.log`);
   deps.print(`      ${logDir}/daemon.stderr.log`);
 
   return success({
-    message: status.running
-      ? `WorkTrain daemon installed and running (PID ${status.pid})`
-      : 'WorkTrain daemon installed (service loaded, not yet running)',
+    message: 'WorkTrain daemon registered. Run: worktrain daemon --start',
     details: [
       `Plist: ${plistPath}`,
+      `Start: worktrain daemon --start`,
       `Logs:  ${logDir}/daemon.stdout.log`,
       `       ${logDir}/daemon.stderr.log`,
     ],
@@ -504,6 +511,139 @@ async function runStatus(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CREDENTIAL CHECK
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parse KEY=VALUE lines from a .env file string.
+ * Lines starting with # and blank lines are ignored.
+ * Exported for testing.
+ */
+export function parseDotEnv(content: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const value = trimmed.slice(eqIdx + 1).trim();
+    if (key) result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Check whether at least one LLM credential is available, combining the
+ * current process env with keys parsed from ~/.workrail/.env.
+ *
+ * WHY warn not fail: the credential may be in ~/.aws/credentials (SSO) or
+ * injected by the system in ways we can't detect at start time. A warning
+ * surfaces the misconfiguration without blocking legitimate setups.
+ *
+ * Returns a warning message if no credential is found, or null if ok.
+ */
+async function checkCredentials(
+  deps: WorktrainDaemonCommandDeps,
+): Promise<string | null> {
+  const home = deps.homedir();
+  const envFilePath = deps.joinPath(home, '.workrail', '.env');
+
+  // Merge process env + .env file
+  const merged: Record<string, string | undefined> = { ...deps.env };
+  try {
+    const envContent = await deps.readFile(envFilePath);
+    const parsed = parseDotEnv(envContent);
+    for (const [k, v] of Object.entries(parsed)) {
+      if (!(k in merged)) merged[k] = v; // .env does not override process env
+    }
+  } catch {
+    // .env is optional -- missing is fine
+  }
+
+  const hasAnthropic = !!(merged['ANTHROPIC_API_KEY']);
+  const hasBedrock = !!(merged['AWS_PROFILE'] || merged['AWS_ACCESS_KEY_ID']);
+
+  if (!hasAnthropic && !hasBedrock) {
+    return (
+      'No LLM credentials found in process env or ~/.workrail/.env.\n' +
+      'The daemon will fail when it tries to call the LLM.\n' +
+      'Add one of the following to ~/.workrail/.env:\n' +
+      '  ANTHROPIC_API_KEY=sk-ant-...\n' +
+      '  AWS_PROFILE=your-sso-profile'
+    );
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// START / STOP
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function runStart(deps: WorktrainDaemonCommandDeps): Promise<CliResult> {
+  const home = deps.homedir();
+  const plistPath = deps.joinPath(home, 'Library', 'LaunchAgents', PLIST_FILENAME);
+  const logDir = deps.joinPath(home, '.workrail', 'logs');
+
+  if (!(await deps.exists(plistPath))) {
+    return failure(
+      'WorkTrain daemon is not installed. Run: worktrain daemon --install',
+      { suggestions: ['worktrain daemon --install'] },
+    );
+  }
+
+  // Warn if no LLM credentials found -- sessions will fail without them.
+  const credWarning = await checkCredentials(deps);
+  if (credWarning) {
+    deps.print('');
+    deps.print('WARNING: ' + credWarning);
+    deps.print('');
+  }
+
+  const result = await deps.exec('launchctl', ['start', LAUNCHD_LABEL]);
+  if (result.exitCode !== 0) {
+    return failure(
+      `launchctl start failed (exit ${result.exitCode}): ${result.stderr.trim() || result.stdout.trim()}`,
+      { suggestions: [`View logs: tail -f ${logDir}/daemon.stderr.log`] },
+    );
+  }
+
+  // Brief wait then verify
+  await deps.sleep(1000);
+  const listResult = await deps.exec('launchctl', ['list', LAUNCHD_LABEL]);
+  const status = parseLaunchctlList(listResult.stdout, listResult.exitCode);
+
+  if (status.running) {
+    deps.print(`WorkTrain daemon started (PID ${status.pid}).`);
+    deps.print(`Logs: ${logDir}/daemon.stdout.log`);
+    return success({ message: `WorkTrain daemon started (PID ${status.pid})` });
+  }
+
+  return failure(
+    'launchctl start returned 0 but daemon does not appear to be running.',
+    { suggestions: [`View logs: tail -f ${logDir}/daemon.stderr.log`] },
+  );
+}
+
+async function runStop(deps: WorktrainDaemonCommandDeps): Promise<CliResult> {
+  const result = await deps.exec('launchctl', ['stop', LAUNCHD_LABEL]);
+  if (result.exitCode !== 0) {
+    // launchctl stop exits non-zero if the service is already stopped -- not fatal
+    const msg = result.stderr.trim() || result.stdout.trim();
+    if (msg.toLowerCase().includes('not running') || msg.toLowerCase().includes('no such process')) {
+      deps.print('WorkTrain daemon is not running.');
+      return success({ message: 'WorkTrain daemon is not running.' });
+    }
+    return failure(
+      `launchctl stop failed (exit ${result.exitCode}): ${msg}`,
+    );
+  }
+
+  deps.print('WorkTrain daemon stopped.');
+  return success({ message: 'WorkTrain daemon stopped.' });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN COMMAND
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -522,7 +662,7 @@ export async function executeWorktrainDaemonCommand(
   deps: WorktrainDaemonCommandDeps,
   opts: WorktrainDaemonCommandOpts,
 ): Promise<CliResult> {
-  const flagCount = [opts.install, opts.uninstall, opts.status].filter(Boolean).length;
+  const flagCount = [opts.install, opts.uninstall, opts.status, opts.start, opts.stop].filter(Boolean).length;
 
   // No flags: this is the launchd entry point. Start the daemon process.
   if (flagCount === 0) {
@@ -533,23 +673,25 @@ export async function executeWorktrainDaemonCommand(
       return success({ message: 'WorkTrain daemon stopped.' });
     }
     return misuse(
-      'Specify one of: --install, --uninstall, or --status',
+      'Specify one of: --install, --uninstall, --start, --stop, or --status',
       [
-        'worktrain daemon --install    Install and start as a launchd service',
-        'worktrain daemon --uninstall  Stop and remove the launchd service',
+        'worktrain daemon --install    Register as a launchd service (does not auto-start)',
+        'worktrain daemon --start      Start the daemon',
+        'worktrain daemon --stop       Stop the daemon',
         'worktrain daemon --status     Show service status',
+        'worktrain daemon --uninstall  Remove the launchd service registration',
       ],
     );
   }
 
   if (flagCount > 1) {
-    return misuse('--install, --uninstall, and --status are mutually exclusive. Specify only one.');
+    return misuse('--install, --uninstall, --start, --stop, and --status are mutually exclusive. Specify only one.');
   }
 
-  // Platform guard: launchd management is macOS-only.
+  // All management flags (install/uninstall/start/stop/status) require macOS (launchd).
   if (deps.platform !== 'darwin') {
     return failure(
-      `worktrain daemon --install requires macOS (launchd). ` +
+      `worktrain daemon management flags require macOS (launchd). ` +
       `Current platform: ${deps.platform}.`,
       {
         suggestions: [
@@ -562,6 +704,8 @@ export async function executeWorktrainDaemonCommand(
 
   if (opts.install) return runInstall(deps);
   if (opts.uninstall) return runUninstall(deps);
+  if (opts.start) return runStart(deps);
+  if (opts.stop) return runStop(deps);
   // opts.status must be true at this point.
   return runStatus(deps);
 }

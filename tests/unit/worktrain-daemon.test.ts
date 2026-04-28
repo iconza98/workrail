@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   executeWorktrainDaemonCommand,
+  parseDotEnv,
   type WorktrainDaemonCommandDeps,
 } from '../../src/cli/commands/worktrain-daemon.js';
 import { loadDaemonEnv, type LoadDaemonEnvDeps } from '../../src/daemon/daemon-env.js';
@@ -162,16 +163,15 @@ describe('worktrain daemon --install', () => {
     }
   });
 
-  it('returns failure when no LLM credentials are present', async () => {
+  it('succeeds even when no LLM credentials in env (secrets go in ~/.workrail/.env)', async () => {
+    // Credentials are no longer required at install time -- they go in
+    // ~/.workrail/.env and are loaded by loadDaemonEnv() at daemon startup.
     const deps = buildFakeDeps({
       env: { HOME: '/Users/test', PATH: '/usr/bin' },
     });
     const result = await executeWorktrainDaemonCommand(deps, { install: true });
 
-    expect(result.kind).toBe('failure');
-    if (result.kind === 'failure') {
-      expect(result.output.message).toContain('LLM credentials');
-    }
+    expect(result.kind).toBe('success');
   });
 
   it('writes the plist file to ~/Library/LaunchAgents/', async () => {
@@ -224,13 +224,16 @@ describe('worktrain daemon --install', () => {
     expect(plist).toContain('WORKRAIL_TRIGGERS_ENABLED');
   });
 
-  it('plist contains RunAtLoad and KeepAlive', async () => {
+  it('plist does NOT contain RunAtLoad or KeepAlive (operator must start explicitly)', async () => {
     const deps = buildFakeDeps();
     await executeWorktrainDaemonCommand(deps, { install: true });
 
     const plist = deps.files.get(PLIST_PATH)?.content ?? '';
-    expect(plist).toContain('<key>RunAtLoad</key>');
-    expect(plist).toContain('<key>KeepAlive</key>');
+    // WHY: auto-start at login and auto-restart on crash means WorkTrain acts
+    // autonomously in repos without deliberate operator action. The operator
+    // must explicitly run `worktrain daemon --start` to begin autonomous work.
+    expect(plist).not.toContain('<key>RunAtLoad</key>');
+    expect(plist).not.toContain('<key>KeepAlive</key>');
   });
 
   it('calls launchctl load with the plist path', async () => {
@@ -244,14 +247,22 @@ describe('worktrain daemon --install', () => {
     expect(loadCall?.args[1]).toBe(PLIST_PATH);
   });
 
-  it('returns success with running PID when launchctl list shows PID', async () => {
+  it('returns success with --start instruction (install no longer auto-starts)', async () => {
     const deps = buildFakeDeps();
     const result = await executeWorktrainDaemonCommand(deps, { install: true });
 
     expect(result.kind).toBe('success');
     if (result.kind === 'success') {
-      expect(result.output?.message).toContain('PID 42');
+      expect(result.output?.message).toContain('--start');
     }
+  });
+
+  it('output tells operator to run --start after install', async () => {
+    const deps = buildFakeDeps();
+    await executeWorktrainDaemonCommand(deps, { install: true });
+    const output = deps.printed.join('\n');
+    expect(output).toContain('--start');
+    expect(output).not.toContain('running (PID');
   });
 
   it('unloads existing service before reinstalling', async () => {
@@ -376,6 +387,131 @@ describe('worktrain daemon --uninstall', () => {
     // Non-fatal: plist should still be removed and result should be success.
     expect(result.kind).toBe('success');
     expect(deps.files.has(PLIST_PATH)).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// --start
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('worktrain daemon --start', () => {
+  it('returns failure when plist is not installed', async () => {
+    const deps = buildFakeDeps();
+    // No plist in files -- not installed
+    const result = await executeWorktrainDaemonCommand(deps, { start: true });
+
+    expect(result.kind).toBe('failure');
+    if (result.kind === 'failure') {
+      expect(result.output.message).toContain('not installed');
+    }
+  });
+
+  it('calls launchctl start with the service label', async () => {
+    const deps = buildFakeDeps();
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    await executeWorktrainDaemonCommand(deps, { start: true });
+
+    const startCall = deps.execCalls.find(
+      (c) => c.command === 'launchctl' && c.args[0] === 'start',
+    );
+    expect(startCall).toBeDefined();
+    expect(startCall?.args[1]).toBe('io.worktrain.daemon');
+  });
+
+  it('returns success with PID when daemon starts successfully', async () => {
+    const deps = buildFakeDeps();
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    const result = await executeWorktrainDaemonCommand(deps, { start: true });
+
+    expect(result.kind).toBe('success');
+    if (result.kind === 'success') {
+      expect(result.output?.message).toContain('PID 42');
+    }
+  });
+
+  it('returns failure when launchctl start fails', async () => {
+    const deps = buildFakeDeps({
+      exec: async (command, args) => {
+        if (command === 'launchctl' && args[0] === 'start') {
+          return { stdout: '', stderr: 'service not loaded', exitCode: 1 };
+        }
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    const result = await executeWorktrainDaemonCommand(deps, { start: true });
+
+    expect(result.kind).toBe('failure');
+  });
+
+  it('returns failure on non-darwin platform', async () => {
+    const deps = buildFakeDeps({ platform: 'linux' });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    const result = await executeWorktrainDaemonCommand(deps, { start: true });
+
+    expect(result.kind).toBe('failure');
+    if (result.kind === 'failure') {
+      expect(result.output.message).toContain('macOS');
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// --stop
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('worktrain daemon --stop', () => {
+  it('calls launchctl stop with the service label', async () => {
+    const deps = buildFakeDeps();
+
+    await executeWorktrainDaemonCommand(deps, { stop: true });
+
+    const stopCall = deps.execCalls.find(
+      (c) => c.command === 'launchctl' && c.args[0] === 'stop',
+    );
+    expect(stopCall).toBeDefined();
+    expect(stopCall?.args[1]).toBe('io.worktrain.daemon');
+  });
+
+  it('returns success when launchctl stop succeeds', async () => {
+    const deps = buildFakeDeps();
+    const result = await executeWorktrainDaemonCommand(deps, { stop: true });
+
+    expect(result.kind).toBe('success');
+  });
+
+  it('returns success with "not running" message when service is already stopped', async () => {
+    const deps = buildFakeDeps({
+      exec: async (command, args) => {
+        if (command === 'launchctl' && args[0] === 'stop') {
+          return { stdout: '', stderr: 'no such process', exitCode: 1 };
+        }
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    });
+
+    const result = await executeWorktrainDaemonCommand(deps, { stop: true });
+
+    // Already stopped is not an error -- it's the desired end state
+    expect(result.kind).toBe('success');
+    if (result.kind === 'success') {
+      expect(result.output?.message).toContain('not running');
+    }
+  });
+
+  it('returns failure on non-darwin platform', async () => {
+    const deps = buildFakeDeps({ platform: 'linux' });
+
+    const result = await executeWorktrainDaemonCommand(deps, { stop: true });
+
+    expect(result.kind).toBe('failure');
+    if (result.kind === 'failure') {
+      expect(result.output.message).toContain('macOS');
+    }
   });
 });
 
@@ -543,5 +679,113 @@ describe('loadDaemonEnv', () => {
     await loadDaemonEnv(fakeDeps('COMPLEX_VALUE=value=with=equals=signs'));
 
     expect(process.env['COMPLEX_VALUE']).toBe('value=with=equals=signs');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// parseDotEnv
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('parseDotEnv', () => {
+  it('parses simple KEY=VALUE lines', () => {
+    const result = parseDotEnv('FOO=bar\nBAZ=qux');
+    expect(result['FOO']).toBe('bar');
+    expect(result['BAZ']).toBe('qux');
+  });
+
+  it('ignores comment lines starting with #', () => {
+    const result = parseDotEnv('# this is a comment\nFOO=bar');
+    expect(Object.keys(result)).toEqual(['FOO']);
+  });
+
+  it('ignores blank lines', () => {
+    const result = parseDotEnv('\n\nFOO=bar\n\n');
+    expect(Object.keys(result)).toEqual(['FOO']);
+  });
+
+  it('handles value with equals signs', () => {
+    const result = parseDotEnv('API_KEY=sk-ant-abc=123');
+    expect(result['API_KEY']).toBe('sk-ant-abc=123');
+  });
+
+  it('returns empty object for empty content', () => {
+    expect(parseDotEnv('')).toEqual({});
+    expect(parseDotEnv('# only comments\n\n')).toEqual({});
+  });
+
+  it('ignores lines without equals sign', () => {
+    const result = parseDotEnv('INVALID_LINE\nFOO=bar');
+    expect(result['INVALID_LINE']).toBeUndefined();
+    expect(result['FOO']).toBe('bar');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// --start credential warning
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('worktrain daemon --start credential check', () => {
+  it('starts without warning when ANTHROPIC_API_KEY is in process env', async () => {
+    const deps = buildFakeDeps({
+      env: { AWS_PROFILE: undefined, ANTHROPIC_API_KEY: 'sk-ant-test', HOME: '/Users/test', PATH: '/usr/bin' },
+    });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    await executeWorktrainDaemonCommand(deps, { start: true });
+
+    const output = deps.printed.join('\n');
+    expect(output).not.toContain('WARNING');
+  });
+
+  it('starts without warning when AWS_PROFILE is in process env', async () => {
+    const deps = buildFakeDeps({
+      env: { AWS_PROFILE: 'my-profile', HOME: '/Users/test', PATH: '/usr/bin' },
+    });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    await executeWorktrainDaemonCommand(deps, { start: true });
+
+    const output = deps.printed.join('\n');
+    expect(output).not.toContain('WARNING');
+  });
+
+  it('starts without warning when ANTHROPIC_API_KEY is in ~/.workrail/.env', async () => {
+    const deps = buildFakeDeps({
+      env: { HOME: '/Users/test', PATH: '/usr/bin' }, // no creds in env
+    });
+    // Put the key in the .env file
+    deps.files.set('/Users/test/.workrail/.env', { content: 'ANTHROPIC_API_KEY=sk-ant-from-file' });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    await executeWorktrainDaemonCommand(deps, { start: true });
+
+    const output = deps.printed.join('\n');
+    expect(output).not.toContain('WARNING');
+  });
+
+  it('prints WARNING when no credentials found anywhere', async () => {
+    const deps = buildFakeDeps({
+      env: { HOME: '/Users/test', PATH: '/usr/bin' }, // no creds
+      // readFile will throw ENOENT for .env since files map is empty
+    });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    await executeWorktrainDaemonCommand(deps, { start: true });
+
+    const output = deps.printed.join('\n');
+    expect(output).toContain('WARNING');
+    expect(output).toContain('~/.workrail/.env');
+  });
+
+  it('still starts successfully even when credentials warning fires', async () => {
+    const deps = buildFakeDeps({
+      env: { HOME: '/Users/test', PATH: '/usr/bin' }, // no creds
+    });
+    deps.files.set(PLIST_PATH, { content: '<plist />' });
+
+    const result = await executeWorktrainDaemonCommand(deps, { start: true });
+
+    // Warning is advisory -- start still proceeds
+    expect(result.kind).toBe('success');
   });
 });
