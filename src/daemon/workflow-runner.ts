@@ -4733,9 +4733,6 @@ export async function runWorkflow(
     state.isComplete = true;
     state.lastStepNotes = notes;
     state.lastStepArtifacts = artifacts;
-    state.stepAdvanceCount++;
-    if (state.workrailSessionId !== null) daemonRegistry?.heartbeat(state.workrailSessionId);
-    emitter?.emit({ kind: 'step_advanced', sessionId, ...withWorkrailSession(state.workrailSessionId) });
   };
 
   // ---- Schemas + tool construction ----
