@@ -84,6 +84,12 @@ const CAPTURED_ENV_VARS = [
   'USER',
   'PATH',
 
+  // Trigger webhook listener port (default 3200). Must be in plist so the
+  // daemon and the --start health check both use the same port. Without this,
+  // a user with WORKRAIL_TRIGGER_PORT set in their shell would poll the wrong
+  // port during --start and get a false "daemon did not respond" failure.
+  'WORKRAIL_TRIGGER_PORT',
+
   // WorkRail developer overrides (useful for local dev installs)
   'WORKRAIL_DEV',
   'WORKRAIL_LOG_LEVEL',
@@ -135,6 +141,15 @@ export interface WorktrainDaemonCommandDeps {
   readonly print: (line: string) => void;
   /** Sleep for the given number of milliseconds. */
   readonly sleep: (ms: number) => Promise<void>;
+  /**
+   * Make an HTTP GET request and return the response status code, or null on
+   * any error (connection refused, network timeout, non-HTTP error, etc.).
+   *
+   * WHY this dep exists: the health check in runStart() must poll the daemon's
+   * /health endpoint to verify real liveness, not just launchctl PID presence.
+   * Injecting it keeps runStart() testable without a real HTTP server.
+   */
+  readonly httpGet: (url: string) => Promise<number | null>;
   /**
    * Start the trigger listener daemon process. Called when `worktrain daemon`
    * is invoked with no flags -- the launchd entry point.
@@ -328,6 +343,40 @@ function parseLaunchctlList(
   } catch {
     return { running: false, pid: null, loaded: false };
   }
+}
+
+/**
+ * Poll `url` until it responds with HTTP 200, or until `maxAttempts` is
+ * exhausted. Sleeps `intervalMs` before each attempt.
+ *
+ * WHY polling instead of a fixed wait: a fixed wait creates a false-positive
+ * when the daemon crashes immediately after launch -- launchctl briefly shows
+ * a PID for the exited process. Polling the actual health endpoint is the
+ * authoritative liveness check: if /health responds 200, the daemon is up.
+ *
+ * WHY exported: the polling logic is reusable for a future `--status` command
+ * that also needs to check whether the daemon is alive.
+ *
+ * Sleep happens BEFORE the httpGet call so the daemon has time to start
+ * binding its port on the first attempt.
+ */
+export async function pollHealthEndpoint(
+  url: string,
+  deps: Pick<WorktrainDaemonCommandDeps, 'httpGet' | 'sleep'>,
+  maxAttempts: number,
+  intervalMs: number,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await deps.sleep(intervalMs);
+    const status = await deps.httpGet(url);
+    if (status === 200) {
+      return { ok: true };
+    }
+  }
+  return {
+    ok: false,
+    reason: `Health endpoint did not respond after ${maxAttempts} attempts (${(maxAttempts * intervalMs) / 1000}s).`,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -608,20 +657,30 @@ async function runStart(deps: WorktrainDaemonCommandDeps): Promise<CliResult> {
     );
   }
 
-  // Brief wait then verify
-  await deps.sleep(1000);
-  const listResult = await deps.exec('launchctl', ['list', LAUNCHD_LABEL]);
-  const status = parseLaunchctlList(listResult.stdout, listResult.exitCode);
+  // Poll the daemon's health endpoint to verify liveness, not just PID presence.
+  // WHY: a fixed wait + launchctl PID check gives a false positive when the daemon
+  // crashes immediately -- the PID may be briefly visible after exit. Polling
+  // /health is the authoritative liveness signal.
+  const port = deps.env['WORKRAIL_TRIGGER_PORT']
+    ? parseInt(deps.env['WORKRAIL_TRIGGER_PORT'], 10)
+    : 3200;
+  const healthUrl = `http://127.0.0.1:${port}/health`;
+  const poll = await pollHealthEndpoint(healthUrl, deps, 10, 500);
 
-  if (status.running) {
-    deps.print(`WorkTrain daemon started (PID ${status.pid}).`);
+  if (poll.ok) {
+    deps.print('Daemon started successfully.');
     deps.print(`Logs: ${logDir}/daemon.stdout.log`);
-    return success({ message: `WorkTrain daemon started (PID ${status.pid})` });
+    return success({ message: 'Daemon started successfully' });
   }
 
   return failure(
-    'launchctl start returned 0 but daemon does not appear to be running.',
-    { suggestions: [`View logs: tail -f ${logDir}/daemon.stderr.log`] },
+    `Daemon did not respond to health check at ${healthUrl} within 5 seconds.`,
+    {
+      suggestions: [
+        `View logs: tail -f ${logDir}/daemon.stderr.log`,
+        `Check daemon status: worktrain daemon --status`,
+      ],
+    },
   );
 }
 
