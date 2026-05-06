@@ -30,6 +30,7 @@ import { ActiveSessionSet } from '../daemon/active-sessions.js';
 import { loadWorkrailConfigFile, loadWorkspacesFromConfigFile } from '../config/config-file.js';
 import { NotificationService } from './notification-service.js';
 import { runWorkflow } from '../daemon/workflow-runner.js';
+import { createWorkflowEnricherDeps } from '../daemon/workflow-enricher.js';
 import { runStartupRecovery } from '../daemon/startup-recovery.js';
 import type { WebhookEvent, WorkspaceConfig } from './types.js';
 import { asTriggerId } from './types.js';
@@ -440,7 +441,14 @@ export async function startTriggerListener(
   };
 
   // Create router and Express app
-  const runWorkflowFn: RunWorkflowFn = options.runWorkflowFn ?? runWorkflow;
+  // WHY enricherDeps bound here: trigger-listener.ts is the composition root for the
+  // production daemon. Binding the enricher here (not inside runWorkflow) keeps the
+  // production wiring explicit and testable -- tests that pass a fake runWorkflowFn
+  // bypass this wiring entirely and are unaffected.
+  const enricherDeps = createWorkflowEnricherDeps();
+  const baseRunWorkflow = options.runWorkflowFn ?? runWorkflow;
+  const runWorkflowFn: RunWorkflowFn = (trigger, ctx, apiKey, daemonRegistry, emitter, activeSessionSet, _statsDir, _sessionsDir, source) =>
+    baseRunWorkflow(trigger, ctx, apiKey, daemonRegistry, emitter, activeSessionSet, _statsDir, _sessionsDir, source, enricherDeps);
   const router = new TriggerRouter(triggerIndex, ctx, apiKey, runWorkflowFn, undefined, maxConcurrentSessions, options.emitter, notificationService, activeSessionSet, coordinatorDeps, modeExecutors);
   // Bind the router's dispatch function so spawnSession can dispatch in-process.
   // WHY after construction: coordinatorDeps must be created before TriggerRouter (it's
@@ -476,7 +484,9 @@ export async function startTriggerListener(
   // throws from the function's own error-handling path.
   // WHY pass ctx: enables resume-path logic (decode token, count step advances,
   // call executeContinueWorkflow with intent: 'rehydrate' for sessions with progress).
-  await runStartupRecovery(undefined, undefined, ctx, undefined, undefined, undefined, apiKey).catch((err: unknown) => {
+  // WHY pass runWorkflowFn: crash-recovered sessions resume via runWorkflow; passing the
+  // enricher-wrapped fn ensures recovered root sessions also receive context enrichment.
+  await runStartupRecovery(undefined, undefined, ctx, undefined, undefined, runWorkflowFn, apiKey).catch((err: unknown) => {
     console.warn(
       '[TriggerListener] Startup recovery encountered an unexpected error:',
       err instanceof Error ? err.message : String(err),

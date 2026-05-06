@@ -74,6 +74,15 @@ import type {
   ChildWorkflowRunResult,
   OrphanedSession,
 } from './types.js';
+import { extractContextSlots } from './types.js';
+import {
+  enrichTriggerContext,
+  shouldEnrich,
+  EMPTY_RESULT,
+  type WorkflowEnricherDeps,
+  type EnricherResult,
+  type PriorNotesPolicy,
+} from './workflow-enricher.js';
 import type { SessionState, TerminalSignal, StuckConfig, StuckSignal } from './state/index.js';
 import {
   createSessionState,
@@ -314,6 +323,15 @@ export async function runWorkflow(
    * (allocate internally) pass kind: 'allocate' or omit this parameter entirely.
    */
   source?: SessionSource,
+  /**
+   * Optional WorkflowEnricher deps for cross-session context injection.
+   *
+   * WHY optional: callers that don't provide this (e.g. spawn_agent children,
+   * old call sites) get the original behaviour unchanged. Only root sessions
+   * (spawnDepth === 0) with this param injected will receive prior workspace
+   * notes and git diff stat in their system prompt.
+   */
+  enricherDeps?: WorkflowEnricherDeps,
 ): Promise<WorkflowRunResult> {
   // ---- Resolved dirs (injectable for tests) ----
   const statsDir = _statsDir ?? DAEMON_STATS_DIR;
@@ -343,6 +361,20 @@ export async function runWorkflow(
     workflowId: trigger.workflowId,
     workspacePath: trigger.workspacePath,
   });
+
+  // ---- Context enrichment (root sessions only) ----
+  // WHY before buildPreAgentSession: enrichment is I/O-bound (session scan +
+  // git), not session-bound. Running it here ensures all entry points that
+  // reach runWorkflow() get enrichment, regardless of how the session is
+  // created. spawn_agent children bypass this via the spawnDepth guard.
+  let enricherResult: EnricherResult = EMPTY_RESULT;
+  if (enricherDeps !== undefined && shouldEnrich(trigger)) {
+    const { assembledContextSummary } = extractContextSlots(trigger.context);
+    const policy: PriorNotesPolicy = assembledContextSummary !== undefined && assembledContextSummary.trim().length > 0
+      ? 'skip_coordinator_provided'
+      : 'inject';
+    enricherResult = await enrichTriggerContext(trigger, enricherDeps, policy);
+  }
 
   // ---- Pre-agent I/O phase ----
   // All setup (model validation, start_workflow, token decode, persistTokens,
@@ -383,6 +415,7 @@ export async function runWorkflow(
   const readySession = await buildAgentReadySession(
     preResult.session, trigger, ctx, apiKey, sessionId,
     emitter, daemonRegistry, activeSessionSet, runWorkflow,
+    enricherResult,
   );
 
   // ---- Agent loop phase: run prompt loop to completion ----
