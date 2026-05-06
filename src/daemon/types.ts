@@ -401,6 +401,33 @@ export interface WorkflowDeliveryFailed {
 /** Result of a runWorkflow() call. Never throws. */
 export type WorkflowRunResult = WorkflowRunSuccess | WorkflowRunError | WorkflowRunTimeout | WorkflowRunStuck | WorkflowDeliveryFailed;
 
+// ---------------------------------------------------------------------------
+// WorkflowContextSlots
+// ---------------------------------------------------------------------------
+
+/**
+ * Typed extraction of system-managed context fields written into trigger.context
+ * by coordinators. Separate from raw trigger.context so these fields have
+ * explicit types and cannot be accidentally dropped.
+ *
+ * WHY only assembledContextSummary here: coordinator-written fields belong in this
+ * type. WorkflowEnricher output (priorSessionNotes, gitDiffStat) travels as a
+ * separate EnricherResult value threaded through the call chain -- it never touches
+ * trigger.context and therefore doesn't belong here.
+ */
+export interface WorkflowContextSlots {
+  /** Coordinator-assembled prior phase context (discovery/shaping/coding handoffs). */
+  readonly assembledContextSummary?: string;
+}
+
+export function extractContextSlots(context: Readonly<Record<string, unknown>> | undefined): WorkflowContextSlots {
+  if (!context) return {};
+  const assembledContextSummary = typeof context['assembledContextSummary'] === 'string'
+    ? context['assembledContextSummary']
+    : undefined;
+  return { assembledContextSummary };
+}
+
 /**
  * The result variants that runWorkflow() can actually return directly.
  *
@@ -466,20 +493,4 @@ export interface OrphanedSession {
   readonly workspacePath?: string;
 }
 
-// ---------------------------------------------------------------------------
-// WorkflowContextSlots
-// ---------------------------------------------------------------------------
-
-export interface WorkflowContextSlots {
-  /** Coordinator-assembled prior phase context (discovery/shaping/coding handoffs). */
-  readonly assembledContextSummary?: string;
-}
-
-export function extractContextSlots(context: Readonly<Record<string, unknown>> | undefined): WorkflowContextSlots {
-  if (!context) return {};
-  const assembledContextSummary = typeof context['assembledContextSummary'] === 'string'
-    ? context['assembledContextSummary']
-    : undefined;
-  return { assembledContextSummary };
-}
 
