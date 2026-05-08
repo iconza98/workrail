@@ -414,45 +414,22 @@ export type DaemonEvent =
  */
 export class DaemonEventEmitter {
   private readonly _dir: string;
+  private _tail: Promise<void> = Promise.resolve();
 
-  /**
-   * @param dirOverride - Override the output directory. Used in tests to
-   *   capture events in a temp directory without touching ~/.workrail.
-   *   Production code omits this parameter.
-   */
   constructor(dirOverride?: string) {
     this._dir = dirOverride ?? path.join(os.homedir(), '.workrail', 'events', 'daemon');
   }
 
-  /**
-   * Append a structured event to the daily JSONL file.
-   *
-   * Fire-and-forget: returns void synchronously. The underlying append runs
-   * in a detached Promise. All errors are swallowed -- observability must
-   * never affect correctness.
-   *
-   * WHY void + catch: the event append is diagnostic only. A failed write
-   * (disk full, permission denied) must not propagate to the caller or
-   * interrupt the workflow session.
-   */
   emit(event: DaemonEvent): void {
-    void this._append(event).catch(() => {
-      // Intentionally empty: errors are silently swallowed.
-    });
+    // Chaining serializes writes FIFO; .catch() isolates failures so a bad write
+    // never blocks subsequent emits.
+    this._tail = this._tail.then(() => this._append(event)).catch(() => {});
   }
 
-  /**
-   * Internal async append implementation.
-   *
-   * WHY separated from emit(): keeps emit() synchronous and the async I/O
-   * path unit-testable in isolation.
-   */
   private async _append(event: DaemonEvent): Promise<void> {
     const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     const filePath = path.join(this._dir, `${date}.jsonl`);
-
     await fs.mkdir(this._dir, { recursive: true });
-
     const line = JSON.stringify({ ...event, ts: Date.now() }) + '\n';
     await fs.appendFile(filePath, line, 'utf8');
   }
