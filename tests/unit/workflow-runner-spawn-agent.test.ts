@@ -483,3 +483,161 @@ describe('makeSpawnAgentTool() result mapping', () => {
     expect(capturedSessionSet).toBe(activeSessionSet);
   });
 });
+
+// ── Parallel spawn tests ──────────────────────────────────────────────────────
+
+describe('makeSpawnAgentTool() parallel spawn (agents[])', () => {
+  beforeEach(() => {
+    mockExecuteStartWorkflow.mockReturnValue(makeFakeStartResult());
+  });
+
+  function makeParallelParams(count: number) {
+    return {
+      agents: Array.from({ length: count }, (_, i) => ({
+        workflowId: `workflow-${i}`,
+        goal: `goal ${i}`,
+        workspacePath: os.tmpdir(),
+      })),
+    };
+  }
+
+  it('returns kind: parallel with results array matching input order', async () => {
+    const results: ChildWorkflowRunResult[] = [
+      { _tag: 'success', workflowId: 'workflow-0', stopReason: 'done', lastStepNotes: 'notes-0' },
+      { _tag: 'success', workflowId: 'workflow-1', stopReason: 'done', lastStepNotes: 'notes-1' },
+    ];
+    let callIndex = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => results[callIndex++]! as any;
+
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+    const result = await tool.execute('call-1', makeParallelParams(2));
+    const parsed = JSON.parse(result.content[0]!.text as string);
+
+    expect(parsed.kind).toBe('parallel');
+    expect(parsed.results).toHaveLength(2);
+    expect(parsed.results[0].outcome).toBe('success');
+    expect(parsed.results[0].notes).toBe('notes-0');
+    expect(parsed.results[1].outcome).toBe('success');
+    expect(parsed.results[1].notes).toBe('notes-1');
+  });
+
+  it('returns partial results when one child fails', async () => {
+    const childResults: ChildWorkflowRunResult[] = [
+      { _tag: 'success', workflowId: 'w0', stopReason: 'done', lastStepNotes: 'ok' },
+      { _tag: 'error', workflowId: 'w1', message: 'child failed', stopReason: 'error' },
+    ];
+    let callIndex = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => childResults[callIndex++]! as any;
+
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+    const result = await tool.execute('call-1', makeParallelParams(2));
+    const parsed = JSON.parse(result.content[0]!.text as string);
+
+    expect(parsed.kind).toBe('parallel');
+    expect(parsed.results[0].outcome).toBe('success');
+    expect(parsed.results[1].outcome).toBe('error');
+    expect(parsed.results[1].notes).toBe('child failed');
+  });
+
+  it('returns depth error per child when depth limit exceeded', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => ({ _tag: 'success', workflowId: 'w', stopReason: 'done' } as any);
+
+    // currentDepth === maxDepth: depth limit already hit
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 3, 3, runWorkflowStub, FAKE_SCHEMAS);
+    const result = await tool.execute('call-1', makeParallelParams(2));
+    const parsed = JSON.parse(result.content[0]!.text as string);
+
+    expect(parsed.kind).toBe('parallel');
+    expect(parsed.results).toHaveLength(2);
+    expect(parsed.results[0].outcome).toBe('error');
+    expect(parsed.results[0].notes).toContain('Max spawn depth exceeded');
+    expect(parsed.results[1].outcome).toBe('error');
+    expect(parsed.results[1].notes).toContain('Max spawn depth exceeded');
+  });
+
+  it('throws when agents array is empty', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => ({ _tag: 'success', workflowId: 'w', stopReason: 'done' } as any);
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+
+    await expect(tool.execute('call-1', { agents: [] })).rejects.toThrow('spawn_agent: agents must be a non-empty array');
+  });
+
+  it('single-spawn result includes kind: single', async () => {
+    const successResult: WorkflowRunSuccess = {
+      _tag: 'success',
+      workflowId: 'test-workflow',
+      stopReason: 'done',
+      lastStepNotes: 'done',
+    };
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, makeRunWorkflowStub(successResult), FAKE_SCHEMAS);
+    const result = await tool.execute('call-1', FAKE_PARAMS);
+    const parsed = JSON.parse(result.content[0]!.text as string);
+
+    expect(parsed.kind).toBe('single');
+    expect(parsed.outcome).toBe('success');
+  });
+
+  it('agents form wins when both workflowId and agents are present', async () => {
+    const childResults: ChildWorkflowRunResult[] = [
+      { _tag: 'success', workflowId: 'w', stopReason: 'done', lastStepNotes: 'parallel' },
+    ];
+    let callIndex = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => childResults[callIndex++]! as any;
+
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+    // Both forms present -- agents wins
+    const params = { workflowId: 'should-be-ignored', goal: 'ignored', workspacePath: os.tmpdir(), ...makeParallelParams(1) };
+    const result = await tool.execute('call-1', params);
+    const parsed = JSON.parse(result.content[0]!.text as string);
+
+    expect(parsed.kind).toBe('parallel');
+    expect(parsed.results).toHaveLength(1);
+  });
+
+  it('throws when agents array exceeds maxItems of 10', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => ({ _tag: 'success', workflowId: 'w', stopReason: 'done' } as any);
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+    await expect(tool.execute('call-1', makeParallelParams(11))).rejects.toThrow('exceeds maximum of 10');
+  });
+
+  it('throws when agents[N].context is not a plain object', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runWorkflowStub = async () => ({ _tag: 'success', workflowId: 'w', stopReason: 'done' } as any);
+    const tool = makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+    const params = { agents: [{ workflowId: 'w', goal: 'g', workspacePath: os.tmpdir(), context: 'not-an-object' }] };
+    await expect(tool.execute('call-1', params)).rejects.toThrow('agents[0].context must be a plain object');
+  });
+});
+
+// ── parseParams validation tests ─────────────────────────────────────────────
+
+describe('makeSpawnAgentTool() single-form validation errors', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const runWorkflowStub = async () => ({ _tag: 'success', workflowId: 'w', stopReason: 'done' } as any);
+
+  function makeTool() {
+    return makeSpawnAgentTool('sess-1', FAKE_CTX, FAKE_API_KEY, 'parent', 0, 3, runWorkflowStub, FAKE_SCHEMAS);
+  }
+
+  it('throws when workflowId is missing', async () => {
+    await expect(makeTool().execute('call-1', { goal: 'g', workspacePath: os.tmpdir() })).rejects.toThrow('workflowId must be a non-empty string');
+  });
+
+  it('throws when workflowId is empty string', async () => {
+    await expect(makeTool().execute('call-1', { workflowId: '', goal: 'g', workspacePath: os.tmpdir() })).rejects.toThrow('workflowId must be a non-empty string');
+  });
+
+  it('throws when goal is missing', async () => {
+    await expect(makeTool().execute('call-1', { workflowId: 'w', workspacePath: os.tmpdir() })).rejects.toThrow('goal must be a non-empty string');
+  });
+
+  it('throws when workspacePath is missing', async () => {
+    await expect(makeTool().execute('call-1', { workflowId: 'w', goal: 'g' })).rejects.toThrow('workspacePath must be a non-empty string');
+  });
+});
