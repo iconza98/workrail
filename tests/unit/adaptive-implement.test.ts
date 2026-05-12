@@ -66,8 +66,20 @@ function makePhaseAwareAgentResult(
   return vi.fn().mockImplementation(async () => {
     callCount++;
     if (callCount === 1) {
-      // First call = coding phase -- must return long notes so quality gate passes
-      return { recapMarkdown: 'Coding completed successfully. All implementation steps finished. Output is ready for review.', artifacts: [] };
+      // First call = coding phase -- must return long notes so quality gate passes,
+      // and a wr.coding_handoff artifact with branchName for coordinator delivery.
+      return {
+        recapMarkdown: 'Coding completed successfully. All implementation steps finished. Output is ready for review.\n```json\n{"commitType":"feat","commitScope":"mcp","commitSubject":"feat(mcp): implement auth feature","prTitle":"feat(mcp): implement auth feature","prBody":"## Summary\\n- Implements auth\\n\\n## Test plan\\n- [ ] Tests pass","followUpTickets":[],"filesChanged":["src/auth.ts"]}\n```',
+        artifacts: [{
+          kind: 'wr.coding_handoff',
+          version: 1,
+          branchName: 'worktrain/test-branch',
+          keyDecisions: ['Used JWT for auth'],
+          knownLimitations: [],
+          testsAdded: ['tests/unit/auth.test.ts'],
+          filesChanged: ['src/auth.ts'],
+        }],
+      };
     }
     return reviewBehavior();
   });
@@ -117,6 +129,11 @@ function makeFakeDeps(overrides: Partial<AdaptiveCoordinatorDeps> = {}): Adaptiv
     createPipelineContext: vi.fn().mockResolvedValue(nok(undefined)),
     markPipelineRunComplete: vi.fn().mockResolvedValue(nok(undefined)),
     writePhaseRecord: vi.fn().mockResolvedValue(nok(undefined)),
+    execDelivery: vi.fn().mockImplementation(async (file: string, args: string[]) => {
+      if (file === 'git' && args.includes('commit')) return { stdout: '[worktrain/test-branch abc1234] feat: test', stderr: '' };
+      if (file === 'gh' && args[0] === 'pr') return { stdout: 'https://github.com/org/repo/pull/42', stderr: '' };
+      return { stdout: '', stderr: '' };
+    }),
     ...overrides,
   };
   return deps;
@@ -340,6 +357,11 @@ describe('runImplementPipeline - coding session', () => {
       spawnSession: vi.fn().mockImplementation(async () => ok(`h${++spawnCount}`)),
       awaitSessions: vi.fn().mockImplementation(async (handles: readonly string[]) => makeSuccessAwait(handles[0]!)),
       pollForPR: vi.fn().mockResolvedValue(null), // no PR found
+      // Make delivery not return a PR URL so pollForPR fallback path is exercised
+      execDelivery: vi.fn().mockImplementation(async (file: string, args: string[]) => {
+        if (file === 'git' && args.includes('commit')) return { stdout: '[worktrain/test abc1234] feat: test', stderr: '' };
+        return { stdout: '', stderr: '' }; // gh pr create returns empty -- no PR URL from delivery
+      }),
     });
 
     const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
@@ -441,12 +463,17 @@ describe('runImplementPipeline - happy path', () => {
     if (outcome.kind === 'merged') {
       expect(outcome.prUrl).toBeTruthy();
     }
-    // wr.coding-task was spawned with pitchPath in context
+    // mergePR was called with the PR number extracted from the pollForPR URL
+    expect(deps.mergePR).toHaveBeenCalledWith(42, expect.any(String));
+    // wr.coding-task was spawned with pitchPath in context and branchStrategy:'worktree'
     expect(deps.spawnSession).toHaveBeenCalledWith(
       'wr.coding-task',
       expect.any(String),
       '/workspace',
       expect.objectContaining({ pitchPath: '/workspace/.workrail/current-pitch.md' }),
+      undefined,
+      undefined,
+      'worktree',
     );
   });
 });
@@ -640,5 +667,44 @@ describe('buildDepBumpGoal', () => {
     const goal = buildDepBumpGoal([1], 'bump dep');
     expect(goal).toContain('skip architecture audit');
     expect(goal).toContain('version compatibility');
+  });
+});
+
+// ── mergePR soft-fail coverage (F3 from MR review) ───────────────────────
+
+describe('runImplementPipeline - mergePR soft-fail paths', () => {
+  it('returns merged and logs warning when PR URL is malformed (prNum null)', async () => {
+    const deps = makeFakeDeps({
+      // Make delivery return a malformed PR URL so extractPrNumberFromUrl returns null
+      execDelivery: vi.fn().mockImplementation(async (file: string, args: string[]) => {
+        if (file === 'git' && args.includes('commit')) return { stdout: '[worktrain/test abc1234] feat: test', stderr: '' };
+        if (file === 'gh' && args[0] === 'pr') return { stdout: 'not-a-valid-pr-url', stderr: '' };
+        return { stdout: '', stderr: '' };
+      }),
+    });
+
+    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+
+    expect(outcome.kind).toBe('merged');
+    // mergePR must NOT be called when URL parse fails
+    expect(deps.mergePR).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.stderr)).toHaveBeenCalledWith(
+      expect.stringContaining('Could not extract PR number'),
+    );
+  });
+
+  it('returns merged and logs warning when mergePR returns err', async () => {
+    const { err: rErr } = await import('../../src/runtime/result.js');
+    const deps = makeFakeDeps({
+      mergePR: vi.fn().mockResolvedValue(rErr('network timeout')),
+    });
+
+    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+
+    expect(outcome.kind).toBe('merged');
+    expect(deps.mergePR).toHaveBeenCalledWith(42, expect.any(String));
+    expect(vi.mocked(deps.stderr)).toHaveBeenCalledWith(
+      expect.stringContaining('mergePR failed'),
+    );
   });
 });

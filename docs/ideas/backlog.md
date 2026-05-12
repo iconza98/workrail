@@ -1728,6 +1728,81 @@ Combined with the `DEFAULT_MAX_TURNS` cap, this provides defense-in-depth agains
 
 The durable session store, v2 engine, and workflow authoring features shared by all three systems.
 
+### Parallel tool execution in AgentLoop (May 11, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 13** | Cor:1 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
+
+`AgentLoop._executeTools()` runs a sequential `for` loop regardless of how many tool_use blocks the LLM returns in a single response. `toolExecution: 'sequential'` is the only accepted value. When the LLM requests multiple reads, globs, or greps in one turn, they execute one by one.
+
+This is fine for tools with ordering requirements (`complete_step` must return the next prompt before Bash acts on it), but it is needlessly slow for independent I/O -- reading 5 files, running 3 greps, or fetching 4 URLs. Discovery and research workflows are the worst cases: they spend the majority of their turns on file reads that have zero ordering dependencies.
+
+The fix is a `toolExecution: 'parallel'` strategy in `AgentLoop._executeTools()` that `Promise.all`s over the tool_use blocks when no ordering constraint exists. The sequential path stays as-is. Callers opt in via `AgentLoopOptions.toolExecution`.
+
+**Design confirmed by Claude Code research (May 11, 2026, research/wr-research-ccloop-001/brief.md):**
+
+Claude Code uses exactly this pattern. Key findings:
+- Tool safety is **four-axis**, not binary: `isConcurrencySafe`, `isReadOnly`, `isDestructive`, `interruptBehavior` -- all per-invocation methods, all fail-closed defaults
+- `partitionToolCalls()` groups consecutive `isConcurrencySafe=true` tools into one batch; singleton batches for non-safe tools
+- `runToolsConcurrently(cap=10)` runs each batch via a bounded executor (implementation in `utils/generators.ts`, not yet fetched -- the cap=10 implementation details are unverified)
+- **BashTool uses dynamic per-command analysis** (`checkReadOnlyConstraints()`) rather than a static flag -- needed for correct Bash classification
+
+**Confirmed tool safety values:**
+| Tool | isConcurrencySafe | isReadOnly |
+|---|---|---|
+| Read / FileReadTool | true | true |
+| Glob | true | true |
+| Grep | true | true |
+| WebFetch / WebSearchTool | true | true |
+| BashTool | dynamic (per-command) | dynamic |
+| Edit / FileEditTool | false | false |
+| Write / FileWriteTool | false | false |
+
+**Implementation path (non-streaming, most adoptable):** add `isConcurrencySafe(): boolean` and `isReadOnly(): boolean` methods to `AgentTool` interface (fail-closed: default false), then wrap `_executeTools()` with `partitionToolCalls()` + `runToolsConcurrently()`. The sequential path remains as the fallback.
+
+**Open question:** how `utils/generators.ts`'s `all()` implements the concurrency cap (semaphore? backpressure? simple Promise.all with limit?). Must fetch before implementing to avoid wrong cap semantics.
+
+**Relationship to parallel spawn_agent:** `spawn_agent` solved this at the session-spawn level. This item solves it at the within-session tool level -- complementary.
+
+**Expected impact:** wr.discovery sessions that read 20+ files per turn would complete in `max(file_read_times)` instead of `sum(file_read_times)`. Rough estimate: 30-50% wall-clock reduction on read-heavy phases.
+
+---
+
+### Token-velocity stuck detection: add diminishing-returns check as complement to repeated-tool-call heuristic (May 11, 2026)
+
+**Status: idea** | Priority: medium
+
+**Score: 11** | Cor:2 Cap:1 Eff:3 Lev:2 Con:3 | Blocked: no
+
+WorkRail's current stuck detection catches the "spinning on the same tool call" failure mode (`repeated_tool_call` heuristic: same tool + same args 3x). It does not catch the "model producing diminishing output each turn" failure mode -- where the agent keeps calling the LLM but each response is smaller and less meaningful than the last.
+
+Claude Code research (May 11, 2026, `research/wr-research-ccloop-001/brief.md`, Finding 5) confirmed Claude Code uses a `BudgetTracker` diminishing-returns check: if `continuationCount >= 3` AND the last two token deltas are both `< 500 tokens`, the loop stops. This catches sessions that are technically making progress (new tokens each turn) but producing nothing useful.
+
+**Implementation:** Track the last N output token counts in the `AgentLoop` or in `SessionState`. After each LLM turn, check if `turnCount >= 3` and `lastTwoOutputTokenDeltas.every(d => d < 500)`. If true, fire the stuck signal with `reason: 'token_velocity'`. Subject to `stuckAbortPolicy` (abort vs notify_only) same as existing heuristics.
+
+**The two heuristics are complementary, not competing:** `repeated_tool_call` catches "stuck on one tool call"; `token_velocity` catches "running but producing nothing". Both should be active.
+
+**Note:** WorkRail's prior analysis ("Claude Code has more sophisticated stuck detection") was falsified by the research. Claude Code has NO dedicated stuck detector beyond these two mechanisms. WorkRail is not inferior -- it addresses a different failure mode. This item adds coverage of the second failure mode.
+
+---
+
+### Three-level AbortController hierarchy for parallel batch isolation (May 11, 2026)
+
+**Status: idea** | Priority: medium
+
+**Score: 11** | Cor:2 Cap:2 Eff:2 Lev:2 Con:3 | Blocked: parallel tool execution backlog item
+
+WorkRail's current abort model is two-level: session `AbortController` (propagated to LLM calls) and per-tool `AbortSignal` (passed to `tool.execute()`). When running tools in parallel batches (once the parallel tool execution item ships), a tool failure in the batch should abort sibling tools in the same batch -- but NOT abort the entire session. There is currently no "batch-scoped" abort level.
+
+Claude Code research (May 11, 2026, `research/wr-research-ccloop-001/brief.md`, Finding 3) confirmed Claude Code uses a three-level hierarchy: **session AbortController > siblingAbortController (scoped per concurrent batch) > per-tool controller**. Key asymmetry: only `BashTool` errors cascade to sibling batch members -- read-tool errors do not. This allows batch-level error isolation without killing the session.
+
+**Implementation:** When `runToolsConcurrently()` executes a batch, create a `siblingAbortController` scoped to that batch. If a Bash tool throws (or returns `isError: true` with a fatal result), signal `siblingAbortController` to abort sibling tools still in-flight. Read/Glob/Grep errors do NOT cascade. Session `AbortController` is unchanged -- only the batch-scoped controller is signaled.
+
+**Blocked by:** parallel tool execution item (no batches = no batch-scoped abort needed).
+
+---
+
 ### State-of-the-code context: pass diffs or transformations instead of full file contents (May 11, 2026)
 
 **Status: idea** | Priority: medium
@@ -2128,6 +2203,52 @@ Surface in: `worktrain status`, `worktrain health <sessionId>`, console session 
 
 Coordinator design patterns for WorkTrain's autonomous pipeline.
 
+### Coordinator-owned delivery: full pipeline produces commits, PRs, and merges (May 11, 2026)
+
+**Status: done** | Shipped PR #1003 (May 11, 2026)
+
+**Score: 15** | Cor:3 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
+
+Three sub-failures fixed: (1) coding sessions now get `branchStrategy:'worktree'` via `spawnSession()` so they run on an isolated branch; (2) new `runCoordinatorDelivery()` reads the `HandoffArtifact` from `recapMarkdown` and calls `runDelivery()` for git commit + gh pr create; (3) `deps.mergePR()` now called on clean and post-audit-clean verdicts -- the hollow `{ kind: 'merged' }` is gone. `CodingHandoffArtifactV1.branchName` used for `pollForPR()` to fix the `sess_*` handle vs branch name mismatch. Missing `branchName` escalates immediately instead of burning 5 minutes. New `execDelivery` dep on `AdaptiveCoordinatorDeps` for testable DI.
+
+---
+
+### Shared pipeline worktree: one isolated workspace for the entire task lifecycle (May 11, 2026)
+
+**Status: idea** | Priority: critical -- MVP blocker
+
+**Score: 15** | Cor:3 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
+
+Today the pipeline creates a `branchStrategy: 'worktree'` for the coding session only. Discovery writes a design doc to the main workspace. Shaping reads it and writes a pitch. Coding forks from `main` into an isolated worktree -- but if that worktree was created from `main` before discovery's design doc or shaping's pitch were committed, the coding agent cannot see them. The pipeline's file handoffs are silently broken the moment any phase writes to disk rather than committing.
+
+The root cause: each phase session has its own workspace view. There is no shared persistent workspace for the full pipeline run.
+
+**The fix:** the coordinator creates one worktree at the start of the entire pipeline run, before the first session is spawned. All sessions in that pipeline -- discovery, shaping, coding, review -- use the same worktree path as their `workspacePath`. The branch is coordinator-created (deterministic name, e.g. `worktrain/<runId>`), not agent-created. When the pipeline completes, the coordinator owns delivery (already wired as of PR #1003) and cleanup.
+
+**What this enables:**
+- Discovery writes a design doc: shaping sees it immediately (same filesystem)
+- Shaping writes `current-pitch.md`: coding sees it immediately (same filesystem)
+- Coding's changes accumulate on the same branch: the PR represents the full pipeline's work
+- `pollForPR()` uses a coordinator-known branch name -- no artifact parsing needed
+- `runCoordinatorDelivery()` knows the branch before the coding session even starts
+
+**What this replaces:**
+- `spawnSession(branchStrategy: 'worktree')` passing: coordinator creates the worktree, daemon just uses the path
+- `CodingHandoffArtifactV1.branchName` for `pollForPR()`: coordinator already knows the branch name
+- The current delivery architecture (PR #1003) is still correct -- just the branch source changes
+
+**Things to hash out:**
+- Where does worktree creation live? In `runAdaptivePipeline()` before routing, or in each mode executor's prologue? Coordinator-level is cleaner (one cleanup path) but requires passing `effectiveWorkspacePath` through `AdaptivePipelineOpts`.
+- Do discovery and shaping sessions need isolation too, or just coding? Discovery/shaping are read-heavy and don't commit code -- they benefit from the shared workspace for file handoffs but don't need branch isolation for their own work. Giving all phases the same worktree path is simplest.
+- Commit strategy: should discovery or shaping commit their output files (design doc, pitch) to the worktree branch? Or leave them as uncommitted working-directory files? Uncommitted is simpler -- the coding agent picks them up directly. Committed means the history is cleaner and crash recovery can restore them.
+- Cleanup: coordinator's `finally` block (already present in `runFullPipeline`) calls `git worktree remove` after `PipelineOutcome`. Startup recovery prunes stale worktrees on daemon restart (already implemented).
+
+**Relationship to existing entries:**
+- Blocks or supersedes `branchStrategy: 'worktree'` on `spawnSession` (PR #1003) -- that was the right interim fix, but this is the architectural resolution.
+- The coordinator delivery architecture (PR #1003) is unchanged -- `runCoordinatorDelivery()` still runs git commit + gh pr create after the coding session. The branch just comes from the coordinator-created worktree instead of the agent-reported artifact.
+
+---
+
 ### Reliable synthetic human gates: mimicking operator approval and refusal in autonomous pipelines (May 6, 2026)
 
 **Status: idea** | Priority: high
@@ -2525,7 +2646,7 @@ Step-level `systemPrompt` overrides workflow-level for that step.
 
 ### Parallel spawn_agent: run multiple subagents simultaneously instead of sequentially (May 11, 2026)
 
-**Status: idea** | Priority: critical
+**Status: done** | Shipped PR #994 (May 11, 2026)
 
 **Score: 14** | Cor:3 Cap:3 Eff:3 Lev:2 Con:3 | Blocked: no
 
@@ -2822,7 +2943,7 @@ When an MR review session (run by a WorkTrain agent) finds issues in a coding se
 
 ### wr.discovery daemon sessions fail due to 30-minute default timeout (May 9, 2026)
 
-**Status: idea** | Priority: critical
+**Status: done** | Shipped May 11, 2026: `DEFAULT_SESSION_TIMEOUT_MINUTES` 30→60 (`session-context.ts`), `DISCOVERY_TIMEOUT_MS` 55→60 min (`adaptive-pipeline.ts`), shipped in PR #994.
 
 **Score: 15** | Cor:3 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
 
