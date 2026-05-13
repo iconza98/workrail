@@ -10,7 +10,7 @@
  * is a well-defined phase that can be imported and tested independently.
  */
 
-import type { AdaptiveCoordinatorDeps, AdaptivePipelineOpts, PipelineOutcome } from '../adaptive-pipeline.js';
+import type { AdaptiveCoordinatorDeps, PipelineOutcome } from '../adaptive-pipeline.js';
 import { CODING_TIMEOUT_MS, REVIEW_TIMEOUT_MS, checkSpawnCutoff } from '../adaptive-pipeline.js';
 import { readVerdictArtifact, parseFindingsFromNotes } from '../pr-review.js';
 import type { CoordinatorSpawnContext } from '../types.js';
@@ -37,11 +37,14 @@ export const MAX_FIX_ITERATIONS = 2;
  *
  * Shared by IMPLEMENT mode (implement.ts) and FULL pipeline mode (full-pipeline.ts).
  *
+ * @param workspace - The workspace path for all session spawns. Callers pass
+ *   activeWorkspacePath (the shared pipeline worktree) so all sessions operate
+ *   in the same isolated workspace as the coding phase.
  * @param iteration - Current fix loop iteration (0 = first review)
  */
 export async function runReviewAndVerdictCycle(
   deps: AdaptiveCoordinatorDeps,
-  opts: AdaptivePipelineOpts,
+  workspace: string,
   prUrl: string,
   coordinatorStartMs: number,
   iteration: number,
@@ -64,7 +67,7 @@ export async function runReviewAndVerdictCycle(
   const reviewSpawnResult = await deps.spawnSession(
     'wr.mr-review',
     reviewGoal,
-    opts.workspace,
+    workspace,
     reviewContext,
   );
 
@@ -132,7 +135,7 @@ export async function runReviewAndVerdictCycle(
       deps.stderr(`[review-cycle] Verdict clean -- merging PR`);
       const prNum = extractPrNumberFromUrl(prUrl);
       if (prNum !== null) {
-        const mergeResult = await deps.mergePR(prNum, opts.workspace);
+        const mergeResult = await deps.mergePR(prNum, workspace);
         if (mergeResult.kind === 'err') {
           deps.stderr(`[WARN review-cycle] mergePR failed (PR will remain open for manual merge): ${mergeResult.error}`);
         }
@@ -173,7 +176,7 @@ export async function runReviewAndVerdictCycle(
       const fixSpawnResult = await deps.spawnSession(
         'wr.coding-task',
         fixGoal,
-        opts.workspace,
+        workspace,
         fixContext,
       );
 
@@ -204,12 +207,12 @@ export async function runReviewAndVerdictCycle(
       }
 
       deps.stderr(`[review-cycle] Fix iteration ${iteration + 1} complete -- re-reviewing`);
-      return runReviewAndVerdictCycle(deps, opts, prUrl, coordinatorStartMs, iteration + 1, runId, priorArtifacts);
+      return runReviewAndVerdictCycle(deps, workspace, prUrl, coordinatorStartMs, iteration + 1, runId, priorArtifacts);
     }
 
     case 'blocking':
     case 'unknown': {
-      return runAuditChain(deps, opts, prUrl, coordinatorStartMs, findings.severity, rawVerdict?.findings, priorArtifacts);
+      return runAuditChain(deps, workspace, prUrl, coordinatorStartMs, findings.severity, rawVerdict?.findings, priorArtifacts);
     }
   }
 }
@@ -228,12 +231,13 @@ export async function runReviewAndVerdictCycle(
  * 2. Re-review with wr.mr-review
  * 3. If still Critical/blocking: post to Human Outbox, do NOT auto-merge
  *
+ * @param workspace - The workspace path for all session spawns (shared pipeline worktree).
  * @param findings - Raw findings from the verdict artifact, if available.
  *   Used to select the audit workflow. Absent on the keyword-scan path (safe default applies).
  */
 export async function runAuditChain(
   deps: AdaptiveCoordinatorDeps,
-  opts: AdaptivePipelineOpts,
+  workspace: string,
   prUrl: string,
   coordinatorStartMs: number,
   severity: 'blocking' | 'unknown',
@@ -255,7 +259,7 @@ export async function runAuditChain(
   const auditSpawnResult = await deps.spawnSession(
     auditWorkflow,
     `Audit PR before merge: ${prUrl}`,
-    opts.workspace,
+    workspace,
     { prUrl, severity },
   );
 
@@ -321,7 +325,7 @@ export async function runAuditChain(
   const reReviewSpawnResult = await deps.spawnSession(
     'wr.mr-review',
     `Re-review after audit: ${prUrl}`,
-    opts.workspace,
+    workspace,
     { prUrl, auditComplete: true },
   );
 
@@ -420,7 +424,7 @@ export async function runAuditChain(
     deps.stderr(`[audit-chain] Post-audit verdict acceptable (${reFindings.severity}) -- merging`);
     const prNumAudit = extractPrNumberFromUrl(prUrl);
     if (prNumAudit !== null) {
-      const mergeResultAudit = await deps.mergePR(prNumAudit, opts.workspace);
+      const mergeResultAudit = await deps.mergePR(prNumAudit, workspace);
       if (mergeResultAudit.kind === 'err') {
         deps.stderr(`[WARN audit-chain] mergePR failed (PR will remain open for manual merge): ${mergeResultAudit.error}`);
       }

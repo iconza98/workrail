@@ -200,13 +200,52 @@ export interface AdaptiveCoordinatorDeps extends CoordinatorDeps {
    * Create the initial PipelineRunContext file for a new run.
    * Must be called before writePhaseRecord() to avoid placeholder goal/pipelineMode values.
    * Uses atomic write (temp-rename).
+   *
+   * WHY worktreePath required (not optional): the shared pipeline worktree is created before
+   * createPipelineContext is called. Persisting the path atomically with the initial context
+   * write ensures crash recovery can find and reuse the existing worktree on the next run.
+   * The PipelineRunContext Zod schema keeps the field optional for backward-compatible
+   * deserialization of pre-feature context files; this interface type requires it for new writes.
    */
   createPipelineContext(
     workspace: string,
     runId: string,
     goal: string,
     pipelineMode: PipelineRunContext['pipelineMode'],
+    worktreePath: string,
   ): Promise<Result<void, string>>;
+
+  /**
+   * Create the shared git worktree for the pipeline run.
+   *
+   * Runs `git fetch origin <baseBranch>` then
+   * `git worktree add ~/.workrail/worktrees/<runId> -b worktrain/<runId> origin/<baseBranch>`.
+   *
+   * Returns ok(worktreePath) on success. Returns err(reason) if git fails.
+   * Must be called before createPipelineContext so the path can be persisted immediately.
+   *
+   * WHY baseBranch defaults to 'main': matches the per-session worktree default in
+   * buildPreAgentSession(). Operators can override via a future trigger config field.
+   */
+  createPipelineWorktree(
+    workspace: string,
+    runId: string,
+    baseBranch?: string,
+  ): Promise<Result<string, string>>;
+
+  /**
+   * Remove the shared pipeline worktree created by createPipelineWorktree.
+   *
+   * Runs `git worktree remove --force <worktreePath>`. Best-effort: always resolves,
+   * never throws. Failures are expected to be logged by the caller.
+   *
+   * WHY always in coordinator's finally block: mirrors pitch archival pattern.
+   * Must be called AFTER pitch archival -- the pitch lives inside the worktree.
+   */
+  removePipelineWorktree(
+    workspace: string,
+    worktreePath: string,
+  ): Promise<void>;
 
   /**
    * Mark a pipeline run as completed so the active-run.json pointer is not reused by the next fresh run.
@@ -269,7 +308,6 @@ export interface ModeExecutors {
   readonly runImplement: (
     deps: AdaptiveCoordinatorDeps,
     opts: AdaptivePipelineOpts,
-    pitchPath: string,
     coordinatorStartMs: number,
   ) => Promise<PipelineOutcome>;
 
@@ -425,7 +463,7 @@ export async function runAdaptivePipeline(
       return executors.runReviewOnly(deps, opts, pipelineMode.prNumbers, coordinatorStartMs);
 
     case 'IMPLEMENT':
-      return executors.runImplement(deps, opts, pipelineMode.pitchPath, coordinatorStartMs);
+      return executors.runImplement(deps, opts, coordinatorStartMs);
 
     case 'FULL':
       return executors.runFull(deps, opts, coordinatorStartMs);

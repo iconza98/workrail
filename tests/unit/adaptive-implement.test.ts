@@ -129,6 +129,9 @@ function makeFakeDeps(overrides: Partial<AdaptiveCoordinatorDeps> = {}): Adaptiv
     createPipelineContext: vi.fn().mockResolvedValue(nok(undefined)),
     markPipelineRunComplete: vi.fn().mockResolvedValue(nok(undefined)),
     writePhaseRecord: vi.fn().mockResolvedValue(nok(undefined)),
+    // Shared pipeline worktree
+    createPipelineWorktree: vi.fn().mockResolvedValue(nok('/fake/worktree/test-run-id')),
+    removePipelineWorktree: vi.fn().mockResolvedValue(undefined),
     execDelivery: vi.fn().mockImplementation(async (file: string, args: string[]) => {
       if (file === 'git' && args.includes('commit')) return { stdout: '[worktrain/test-branch abc1234] feat: test', stderr: '' };
       if (file === 'gh' && args[0] === 'pr') return { stdout: 'https://github.com/org/repo/pull/42', stderr: '' };
@@ -198,11 +201,12 @@ describe('touchesUI', () => {
 describe('runImplementPipeline - pitch archival', () => {
   it('archives pitch.md on successful pipeline run', async () => {
     const deps = makeFakeDeps();
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('merged');
     expect(deps.archiveFile).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(deps.archiveFile).mock.calls[0]![0]).toBe('/workspace/.workrail/current-pitch.md');
+    // WHY worktree path: pitch is inside the shared pipeline worktree (AC3/AC4 from spec)
+    expect(vi.mocked(deps.archiveFile).mock.calls[0]![0]).toBe('/fake/worktree/test-run-id/.workrail/current-pitch.md');
     expect(vi.mocked(deps.archiveFile).mock.calls[0]![1]).toContain('used-pitches/pitch-');
   });
 
@@ -211,7 +215,7 @@ describe('runImplementPipeline - pitch archival', () => {
       spawnSession: vi.fn().mockResolvedValue(err('connection refused')),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     // Pitch archival must still happen even though the coding session failed
@@ -228,7 +232,7 @@ describe('runImplementPipeline - pitch archival', () => {
       awaitSessions: vi.fn().mockResolvedValue(makeTimeoutAwait('handle-1')),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     expect(deps.archiveFile).toHaveBeenCalledTimes(1);
@@ -240,7 +244,7 @@ describe('runImplementPipeline - pitch archival', () => {
     });
 
     // Pipeline should succeed even if archive fails
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('merged');
     expect(deps.stderr).toHaveBeenCalledWith(
@@ -270,7 +274,7 @@ describe('runImplementPipeline - UX gate', () => {
       }),
     });
 
-    await runImplementPipeline(deps, makeOpts('Build the login screen with proper UX'), '/workspace/.workrail/current-pitch.md', Date.now());
+    await runImplementPipeline(deps, makeOpts('Build the login screen with proper UX'), Date.now());
 
     expect(spawnWorkflows).toContain('wr.ui-ux-design');
   });
@@ -287,7 +291,7 @@ describe('runImplementPipeline - UX gate', () => {
       }),
     });
 
-    await runImplementPipeline(deps, makeOpts('Implement OAuth token refresh'), '/workspace/.workrail/current-pitch.md', Date.now());
+    await runImplementPipeline(deps, makeOpts('Implement OAuth token refresh'), Date.now());
 
     expect(spawnWorkflows).not.toContain('wr.ui-ux-design');
   });
@@ -304,7 +308,7 @@ describe('runImplementPipeline - UX gate', () => {
       }),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts('Build new UI screen'), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts('Build new UI screen'), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     if (outcome.kind === 'escalated') {
@@ -325,7 +329,7 @@ describe('runImplementPipeline - coding session', () => {
       spawnSession: vi.fn().mockResolvedValue(err('daemon not running')),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     if (outcome.kind === 'escalated') {
@@ -342,7 +346,7 @@ describe('runImplementPipeline - coding session', () => {
       }),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     if (outcome.kind === 'escalated') {
@@ -364,7 +368,7 @@ describe('runImplementPipeline - coding session', () => {
       }),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     if (outcome.kind === 'escalated') {
@@ -389,7 +393,7 @@ describe('runImplementPipeline - fix loop cap', () => {
       getAgentResult: makePhaseAwareAgentResult(() => ({ recapMarkdown: minorNotes, artifacts: [] })),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('escalated');
     if (outcome.kind === 'escalated') {
@@ -418,7 +422,7 @@ describe('runImplementPipeline - fix loop cap', () => {
       }),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('merged');
   });
@@ -433,7 +437,7 @@ describe('runImplementPipeline - spawn cutoff', () => {
     const pastStart = Date.now() - 151 * 60 * 1000; // 151 minutes ago
     const deps = makeFakeDeps();
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', pastStart);
+    const outcome = await runImplementPipeline(deps, makeOpts(), pastStart);
 
     expect(outcome.kind).toBe('escalated');
     if (outcome.kind === 'escalated') {
@@ -457,7 +461,7 @@ describe('runImplementPipeline - happy path', () => {
       getAgentResult: makePhaseAwareAgentResult(() => ({ recapMarkdown: 'APPROVE -- LGTM. No findings.', artifacts: [] })),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('merged');
     if (outcome.kind === 'merged') {
@@ -465,15 +469,14 @@ describe('runImplementPipeline - happy path', () => {
     }
     // mergePR was called with the PR number extracted from the pollForPR URL
     expect(deps.mergePR).toHaveBeenCalledWith(42, expect.any(String));
-    // wr.coding-task was spawned with pitchPath in context and branchStrategy:'worktree'
+    // wr.coding-task was spawned with:
+    // - workspace = shared worktree path (enricher resolves git-common-dir from it)
+    // - pitchPath in context pointing into the worktree (pitch invariant 13)
     expect(deps.spawnSession).toHaveBeenCalledWith(
       'wr.coding-task',
       expect.any(String),
-      '/workspace',
-      expect.objectContaining({ pitchPath: '/workspace/.workrail/current-pitch.md' }),
-      undefined,
-      undefined,
-      'worktree',
+      '/fake/worktree/test-run-id',
+      expect.objectContaining({ pitchPath: '/fake/worktree/test-run-id/.workrail/current-pitch.md' }),
     );
   });
 });
@@ -501,16 +504,15 @@ describe('runAuditChain', () => {
     });
 
     const opts: AdaptivePipelineOpts = { workspace: '/workspace', goal: 'Fix auth bug', dryRun: false };
-    await runAuditChain(deps, opts, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking');
+    await runAuditChain(deps, opts.workspace, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking');
 
     // Must dispatch wr.production-readiness-audit as the audit workflow
     expect(spawnedWorkflows).toContain('wr.production-readiness-audit');
-    expect(deps.spawnSession).toHaveBeenCalledWith(
-      'wr.production-readiness-audit',
-      expect.any(String),
-      '/workspace',
-      expect.objectContaining({ prUrl: 'https://github.com/org/repo/pull/42', severity: 'blocking' }),
-    );
+    // Check the first 4 positional args (workflowId, goal, workspace, context)
+    const auditCall = vi.mocked(deps.spawnSession).mock.calls.find(c => c[0] === 'wr.production-readiness-audit');
+    expect(auditCall).toBeDefined();
+    expect(auditCall?.[2]).toBe('/workspace');  // runAuditChain passes its `workspace` arg through
+    expect(auditCall?.[3]).toMatchObject({ prUrl: 'https://github.com/org/repo/pull/42', severity: 'blocking' });
   });
 
   it('merges PR when post-audit re-review returns clean verdict', async () => {
@@ -527,7 +529,7 @@ describe('runAuditChain', () => {
     });
 
     const opts: AdaptivePipelineOpts = { workspace: '/workspace', goal: 'Fix auth bug', dryRun: false };
-    const outcome = await runAuditChain(deps, opts, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking');
+    const outcome = await runAuditChain(deps, opts.workspace, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking');
 
     expect(outcome.kind).toBe('merged');
     if (outcome.kind === 'merged') {
@@ -554,7 +556,7 @@ describe('runAuditChain', () => {
     });
 
     const opts: AdaptivePipelineOpts = { workspace: '/workspace', goal: 'Fix auth bug', dryRun: false };
-    const outcome = await runAuditChain(deps, opts, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking');
+    const outcome = await runAuditChain(deps, opts.workspace, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking');
 
     // Must NOT merge
     expect(outcome.kind).toBe('escalated');
@@ -592,7 +594,7 @@ describe('runAuditChain - findingCategory routing', () => {
 
     const opts: AdaptivePipelineOpts = { workspace: '/workspace', goal: 'Fix arch issue', dryRun: false };
     const findings = [{ severity: 'critical' as const, summary: 'Tight coupling in auth module', findingCategory: 'architecture' as const }];
-    await runAuditChain(deps, opts, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking', findings);
+    await runAuditChain(deps, opts.workspace, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking', findings);
 
     expect(spawnedWorkflows).toContain('wr.architecture-scalability-audit');
     expect(spawnedWorkflows).not.toContain('wr.production-readiness-audit');
@@ -616,7 +618,7 @@ describe('runAuditChain - findingCategory routing', () => {
 
     const opts: AdaptivePipelineOpts = { workspace: '/workspace', goal: 'Fix security issue', dryRun: false };
     const findings = [{ severity: 'critical' as const, summary: 'SQL injection risk', findingCategory: 'security' as const }];
-    await runAuditChain(deps, opts, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking', findings);
+    await runAuditChain(deps, opts.workspace, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking', findings);
 
     expect(spawnedWorkflows).toContain('wr.production-readiness-audit');
     expect(spawnedWorkflows).not.toContain('wr.architecture-scalability-audit');
@@ -641,7 +643,7 @@ describe('runAuditChain - findingCategory routing', () => {
     const opts: AdaptivePipelineOpts = { workspace: '/workspace', goal: 'Fix issue', dryRun: false };
     // findings items have no findingCategory (optional field omitted)
     const findings = [{ severity: 'critical' as const, summary: 'Some critical finding' }];
-    await runAuditChain(deps, opts, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking', findings);
+    await runAuditChain(deps, opts.workspace, 'https://github.com/org/repo/pull/42', Date.now(), 'blocking', findings);
 
     expect(spawnedWorkflows).toContain('wr.production-readiness-audit');
     expect(spawnedWorkflows).not.toContain('wr.architecture-scalability-audit');
@@ -683,7 +685,7 @@ describe('runImplementPipeline - mergePR soft-fail paths', () => {
       }),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('merged');
     // mergePR must NOT be called when URL parse fails
@@ -699,12 +701,151 @@ describe('runImplementPipeline - mergePR soft-fail paths', () => {
       mergePR: vi.fn().mockResolvedValue(rErr('network timeout')),
     });
 
-    const outcome = await runImplementPipeline(deps, makeOpts(), '/workspace/.workrail/current-pitch.md', Date.now());
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
 
     expect(outcome.kind).toBe('merged');
     expect(deps.mergePR).toHaveBeenCalledWith(42, expect.any(String));
     expect(vi.mocked(deps.stderr)).toHaveBeenCalledWith(
       expect.stringContaining('mergePR failed'),
     );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Shared pipeline worktree invariants (AC11 mirrors AC1-AC10 from full-pipeline)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('runImplementPipeline - shared pipeline worktree', () => {
+  it('createPipelineWorktree called before spawnSession (new run)', async () => {
+    const callOrder: string[] = [];
+    const deps = makeFakeDeps({
+      createPipelineWorktree: vi.fn().mockImplementation(async () => {
+        callOrder.push('createPipelineWorktree');
+        return nok('/fake/worktree/test-run-id');
+      }),
+      spawnSession: vi.fn().mockImplementation(async () => {
+        callOrder.push('spawnSession');
+        return nok(`h${Math.random()}`);
+      }),
+      awaitSessions: vi.fn().mockImplementation(async (handles: readonly string[]) => makeSuccessAwait(handles[0]!)),
+      getAgentResult: makePhaseAwareAgentResult(() => ({ recapMarkdown: 'LGTM.', artifacts: [] })),
+    });
+
+    await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(callOrder[0]).toBe('createPipelineWorktree');
+    expect(callOrder.indexOf('createPipelineWorktree')).toBeLessThan(callOrder.indexOf('spawnSession'));
+  });
+
+  it('all sessions use the shared worktree as workspace (enricher resolves git-common-dir)', async () => {
+    const spawnCalls: Array<{ workflowId: string; workspace: string }> = [];
+    const deps = makeFakeDeps({
+      spawnSession: vi.fn().mockImplementation(async (
+        workflowId: string, _goal: string, workspace: string,
+      ) => {
+        spawnCalls.push({ workflowId, workspace });
+        return nok(`h${Math.random()}`);
+      }),
+      awaitSessions: vi.fn().mockImplementation(async (handles: readonly string[]) => makeSuccessAwait(handles[0]!)),
+      getAgentResult: makePhaseAwareAgentResult(() => ({ recapMarkdown: 'LGTM.', artifacts: [] })),
+    });
+
+    await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(spawnCalls.length).toBeGreaterThan(0);
+
+    // All sessions use activeWorkspacePath (the shared worktree) as workspace.
+    // Enricher correctness is provided by resolveRepoRootHash() in infra.ts -- no
+    // separate "enricher workspace" parameter needed in the coordinator layer.
+    for (const s of spawnCalls) {
+      expect(s.workspace).toBe('/fake/worktree/test-run-id');
+      expect(s.workspace).not.toBe('/workspace');
+    }
+  });
+
+  it('removePipelineWorktree called in finally after archiveFile', async () => {
+    const callOrder: string[] = [];
+    const deps = makeFakeDeps({
+      archiveFile: vi.fn().mockImplementation(async () => { callOrder.push('archiveFile'); }),
+      removePipelineWorktree: vi.fn().mockImplementation(async () => { callOrder.push('removePipelineWorktree'); }),
+      awaitSessions: vi.fn().mockImplementation(async (handles: readonly string[]) => makeSuccessAwait(handles[0]!)),
+      getAgentResult: makePhaseAwareAgentResult(() => ({ recapMarkdown: 'LGTM.', artifacts: [] })),
+    });
+
+    await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(callOrder).toContain('archiveFile');
+    expect(callOrder).toContain('removePipelineWorktree');
+    expect(callOrder.indexOf('archiveFile')).toBeLessThan(callOrder.indexOf('removePipelineWorktree'));
+  });
+
+  it('removePipelineWorktree called even when coding session fails', async () => {
+    const deps = makeFakeDeps({
+      spawnSession: vi.fn().mockResolvedValue(err('connection refused')),
+    });
+
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(outcome.kind).toBe('escalated');
+    expect(vi.mocked(deps.removePipelineWorktree)).toHaveBeenCalledTimes(1);
+  });
+
+  it('createPipelineWorktree failure -> escalates at init, no spawnSession', async () => {
+    const { err: neErr } = await import('neverthrow');
+    const deps = makeFakeDeps({
+      createPipelineWorktree: vi.fn().mockResolvedValue(neErr('git not available')),
+    });
+
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(outcome.kind).toBe('escalated');
+    expect((outcome as { escalationReason: { phase: string } }).escalationReason.phase).toBe('init');
+    expect(vi.mocked(deps.spawnSession)).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.removePipelineWorktree)).not.toHaveBeenCalled();
+  });
+
+  it('crash resume: prior worktreePath exists -> createPipelineWorktree NOT called', async () => {
+    const deps = makeFakeDeps({
+      readActiveRunId: vi.fn().mockResolvedValue(nok('prior-run-id')),
+      readPipelineContext: vi.fn().mockResolvedValue(nok({
+        runId: 'prior-run-id', goal: 'test', workspace: '/workspace',
+        startedAt: new Date().toISOString(), pipelineMode: 'IMPLEMENT',
+        worktreePath: '/fake/prior-worktree',
+        status: 'in_progress',
+        phases: {},
+      })),
+      fileExists: vi.fn().mockReturnValue(true),
+      awaitSessions: vi.fn().mockImplementation(async (handles: readonly string[]) => makeSuccessAwait(handles[0]!)),
+      getAgentResult: makePhaseAwareAgentResult(() => ({ recapMarkdown: 'LGTM.', artifacts: [] })),
+    });
+
+    await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(vi.mocked(deps.createPipelineWorktree)).not.toHaveBeenCalled();
+    // All sessions use the prior worktree path as workspace.
+    const spawnCalls = vi.mocked(deps.spawnSession).mock.calls;
+    for (const call of spawnCalls) {
+      expect(call[2]).toBe('/fake/prior-worktree');
+    }
+  });
+
+  it('crash resume: prior worktreePath missing on disk -> escalates', async () => {
+    const deps = makeFakeDeps({
+      readActiveRunId: vi.fn().mockResolvedValue(nok('prior-run-id')),
+      readPipelineContext: vi.fn().mockResolvedValue(nok({
+        runId: 'prior-run-id', goal: 'test', workspace: '/workspace',
+        startedAt: new Date().toISOString(), pipelineMode: 'IMPLEMENT',
+        worktreePath: '/fake/missing-worktree',
+        status: 'in_progress',
+        phases: {},
+      })),
+      fileExists: vi.fn().mockReturnValue(false),
+    });
+
+    const outcome = await runImplementPipeline(deps, makeOpts(), Date.now());
+
+    expect(outcome.kind).toBe('escalated');
+    expect((outcome as { escalationReason: { phase: string } }).escalationReason.phase).toBe('init');
+    expect(vi.mocked(deps.createPipelineWorktree)).not.toHaveBeenCalled();
   });
 });
