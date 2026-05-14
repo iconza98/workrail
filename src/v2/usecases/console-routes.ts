@@ -973,7 +973,7 @@ export function mountConsoleRoutes(
       apiKey ?? '',
       undefined,   // daemonRegistry -- not available in this path
       undefined,   // emitter -- not available in this path
-      undefined,   // activeSessionSet -- not applicable in standalone console
+      undefined,   // activeSessionSet -- no session registry in standalone console (steer not available here)
       undefined,   // _statsDir -- use default
       undefined,   // _sessionsDir -- use default
       source,
@@ -1018,6 +1018,10 @@ export function mountConsoleRoutes(
   app.get('/api/v2/triggers', (_req: Request, res: Response) => {
     res.json({ success: true, data: { triggers: [] } });
   });
+
+  // Note: POST /sessions/:sessionId/steer is served by the daemon's trigger listener
+  // (port 3200), not here. The standalone console runs in a separate process and does
+  // not have access to the daemon's ActiveSessionSet. See trigger-listener.ts createTriggerApp().
 
   // --- Static file serving for Console UI ---
 
