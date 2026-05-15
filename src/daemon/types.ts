@@ -316,7 +316,7 @@ export interface WorkflowRunSuccess {
   readonly lastStepArtifacts?: readonly unknown[];
   /**
    * The isolated worktree path created by runWorkflow() for this session.
-   * Present only when trigger.branchStrategy === 'worktree'.
+   * Present when trigger.branchStrategy === 'worktree' or 'read-only'.
    * Absent for 'none' strategy (session used trigger.workspacePath directly).
    *
    * WHY this field exists: delivery (git add, git commit, git push, gh pr create) runs
@@ -326,7 +326,7 @@ export interface WorkflowRunSuccess {
   readonly sessionWorkspacePath?: string;
   /**
    * The process-local session UUID for this workflow run.
-   * Present only when trigger.branchStrategy === 'worktree'.
+   * Present when trigger.branchStrategy === 'worktree' or 'read-only'.
    * Absent for 'none' strategy.
    *
    * WHY this field exists: trigger-router.ts uses sessionId for branch assertion before
@@ -344,6 +344,18 @@ export interface WorkflowRunSuccess {
     readonly name: string;
     readonly email: string;
   };
+  /**
+   * The WorkRail session ID (sess_* branded ID) of this workflow run.
+   *
+   * WHY this field exists: maybeRunPostWorkflowActions() in TriggerRouter needs the
+   * WorkRail session ID to read artifacts from the session store (for the human_approval
+   * gate path) and to write the review_draft_submitted event via PendingDraftReviewPoller.
+   * Without this field the poller guard `if (ctx?.v2 && resolvedWorkrailSessionId)` is
+   * always false and the poller never starts.
+   *
+   * Absent when the WorkRail session ID was not decoded (rare edge case).
+   */
+  readonly workrailSessionId?: SessionId;
 }
 
 /** Failed workflow run (tool error, agent error, engine error, etc.). */
@@ -446,6 +458,12 @@ export interface WorkflowRunGateParked {
   readonly stepId: string;
   readonly stopReason: string;
   /**
+   * The kind of gate that fired. Determines how TriggerRouter routes the parked session.
+   * 'coordinator_eval': autonomous LLM evaluator (wr.gate-eval-generic).
+   * 'human_approval': human operator approval (e.g. reviewer-assigned draft review).
+   */
+  readonly gateKind: import('../v2/durable-core/constants.js').GateKind;
+  /**
    * The daemon-local session UUID -- keys the sidecar file that resumeFromGate reads.
    * WHY on the result: the trigger router calls resumeFromGate(sessionId, verdict) after
    * gate evaluation; it needs this ID to find the right sidecar.
@@ -480,6 +498,12 @@ export type WorkflowRunResult = WorkflowRunSuccess | WorkflowRunError | Workflow
 export interface WorkflowContextSlots {
   /** Coordinator-assembled prior phase context (discovery/shaping/coding handoffs). */
   readonly assembledContextSummary?: string;
+  /**
+   * The head branch name of the PR being reviewed. Injected by buildGitHubWorkflowTrigger()
+   * from GitHubPR.head.ref so branchStrategy:'read-only' can checkout the PR branch.
+   * Only present for github_prs_poll triggers reviewing a PR (absent for issues).
+   */
+  readonly prBranch?: string;
 }
 
 export function extractContextSlots(context: Readonly<Record<string, unknown>> | undefined): WorkflowContextSlots {
@@ -487,7 +511,10 @@ export function extractContextSlots(context: Readonly<Record<string, unknown>> |
   const assembledContextSummary = typeof context['assembledContextSummary'] === 'string'
     ? context['assembledContextSummary']
     : undefined;
-  return { assembledContextSummary };
+  const prBranch = typeof context['prBranch'] === 'string'
+    ? context['prBranch']
+    : undefined;
+  return { assembledContextSummary, prBranch };
 }
 
 /**

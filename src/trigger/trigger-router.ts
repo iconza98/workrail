@@ -48,6 +48,8 @@ import { resumeFromGate } from '../daemon/gate-resume.js';
 import type { ReviewApprovalAdapter } from './review-approval-adapter.js';
 import { GitHubReviewApprovalAdapter } from './review-approval-adapter.js';
 import { parseReviewVerdictArtifact } from '../v2/durable-core/schemas/artifacts/review-verdict.js';
+import { PendingDraftReviewPoller, writePendingDraftSidecar } from './pending-draft-review-poller.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Default production exec function: promisify(execFile).
@@ -327,6 +329,8 @@ async function maybeRunPostWorkflowActions(
   originalResult: WorkflowRunResult,
   reviewApprovalAdapter: ReviewApprovalAdapter,
   notificationService?: NotificationService,
+  ctx?: V2ToolContext,
+  triggerId?: string,
 ): Promise<void> {
   if (originalResult._tag !== 'success') return;
   if (!workflowTrigger.reviewerIdentity) return;
@@ -359,9 +363,9 @@ async function maybeRunPostWorkflowActions(
   }
 
   // Extract PR number and repo from context (injected by github_prs_poll polling adapter).
-  const ctx = workflowTrigger.context as Record<string, unknown> | undefined;
-  const prNumber = typeof ctx?.['itemNumber'] === 'number' ? ctx['itemNumber'] : undefined;
-  const prUrl = typeof ctx?.['itemUrl'] === 'string' ? ctx['itemUrl'] : undefined;
+  const triggerCtx = workflowTrigger.context as Record<string, unknown> | undefined;
+  const prNumber = typeof triggerCtx?.['itemNumber'] === 'number' ? triggerCtx['itemNumber'] : undefined;
+  const prUrl = typeof triggerCtx?.['itemUrl'] === 'string' ? triggerCtx['itemUrl'] : undefined;
 
   if (prNumber === undefined || prUrl === undefined) {
     console.warn(
@@ -411,8 +415,62 @@ async function maybeRunPostWorkflowActions(
     `prRepo=${prRepo} prNumber=${prNumber} reviewId=${reviewId}`,
   );
 
+  // Write pending-draft sidecar BEFORE starting the poller (crash recovery invariant).
+  const daemonSessionId = originalResult.sessionId ?? randomUUID();
+  const workrailSessionId = originalResult.sessionWorkspacePath
+    ? '' // session ID not directly available here; use empty string if absent
+    : '';
+  // Prefer the workrail session ID from the result if available.
+  // WorkflowRunSuccess.lastStepArtifacts carries the session context but not the session ID.
+  // The sidecar only needs it for the session event log write-back; we skip the event if absent.
+  const resolvedWorkrailSessionId = (originalResult as { workrailSessionId?: string }).workrailSessionId ?? '';
+
+  if (ctx?.v2 && resolvedWorkrailSessionId) {
+    try {
+      await writePendingDraftSidecar({
+        reviewId,
+        prNumber,
+        prRepo,
+        daemonSessionId,
+        workrailSessionId: resolvedWorkrailSessionId,
+        token: reviewerIdentity.token,
+        login: reviewerIdentity.login,
+        createdAt: new Date().toISOString(),
+        triggerId: triggerId ?? '',
+      });
+    } catch (e: unknown) {
+      console.warn(
+        `[TriggerRouter] Failed to write pending-draft sidecar: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+      );
+      // Non-fatal: poller still starts; crash recovery won't work but review still posts.
+    }
+
+    // Start PendingDraftReviewPoller as a fire-and-forget background task.
+    // WHY fire-and-forget: poller runs until operator publishes (could be hours).
+    // Awaiting it would hold the queue callback slot. Same pattern as gate evaluation.
+    const poller = new PendingDraftReviewPoller(reviewApprovalAdapter, {
+      prNumber,
+      prRepo,
+      reviewId,
+      token: reviewerIdentity.token,
+      login: reviewerIdentity.login,
+      workrailSessionId: resolvedWorkrailSessionId,
+      daemonSessionId,
+      sessionStore: ctx.v2.sessionStore,
+      gate: ctx.v2.gate,
+      mintEventId: ctx.v2.idFactory.mintEventId.bind(ctx.v2.idFactory),
+      onSubmitted: (submittedAt) => {
+        console.log(
+          `[TriggerRouter] Review published by operator: workflowId=${workflowTrigger.workflowId} ` +
+          `prRepo=${prRepo} prNumber=${prNumber} submittedAt=${submittedAt}`,
+        );
+      },
+    });
+    poller.start();
+  }
+
   // Notify operator that draft is ready.
-  // PR3 will also start PendingDraftReviewPoller here (fire-and-forget).
   notificationService?.notify(originalResult, `WorkTrain review draft ready on PR #${prNumber} -- open in GitHub to review findings`);
 }
 
@@ -930,111 +988,152 @@ export class TriggerRouter {
           // TODO(follow-up): add onStuck: trigger hook support here
         );
       } else if (result._tag === 'gate_parked') {
-        // Session parked at a requireConfirmation gate. Spawn the gate evaluator session,
-        // get a typed verdict, then resume the parked session with the verdict injected.
-        // WHY fire-and-forget: gate evaluation may take up to DEFAULT_GATE_EVAL_TIMEOUT_MS
-        // (30 min). The trigger queue slot was already released when runWorkflow() returned.
-        // WHY coordinator is the dispatcher (not startup recovery): startup recovery doesn't
-        // have the trigger context needed to choose an evaluator workflow. The trigger router
-        // does -- it knows the trigger definition and workspacePath.
+        // Session parked at a requireConfirmation gate. Route based on gateKind:
+        // - coordinator_eval: spawn wr.gate-eval-generic (existing autonomous path)
+        // - human_approval: skip evaluator, go directly to maybeRunPostWorkflowActions
+        //   (operator publishes the GitHub draft review -- that IS the gate verdict)
+        // WHY switch not if-chain: assertNever enforces exhaustiveness at compile time.
+        // Adding a new GateKind without updating this switch is a build error.
         const sessionId = result.sessionId;
         const stepId = result.stepId;
+        const gateKind = result.gateKind;
         console.log(
           `[TriggerRouter] Workflow parked at gate: triggerId=${trigger.id} ` +
-          `workflowId=${trigger.workflowId} stepId=${stepId} sessionId=${sessionId}`,
+          `workflowId=${trigger.workflowId} stepId=${stepId} sessionId=${sessionId} gateKind=${gateKind}`,
         );
 
-        if (sessionId && this._coordinatorDeps) {
-          const deps = this._coordinatorDeps;
-          const ctx = this.ctx;
-          const apiKey = this.apiKey;
-          const activeSessionSet = this._activeSessionSet;
-          const emitter = this.emitter;
+        switch (gateKind) {
+          case 'coordinator_eval': {
+            if (sessionId && this._coordinatorDeps) {
+              const deps = this._coordinatorDeps;
+              const ctx = this.ctx;
+              const apiKey = this.apiKey;
+              const activeSessionSet = this._activeSessionSet;
+              const emitter = this.emitter;
 
-          // Dispatch gate evaluation fire-and-forget.
-          void (async () => {
-            try {
-              // workrailSessionId is carried directly on the typed result -- no sidecar read needed.
-              // WHY on the result (not sidecar): WorkflowRunGateParked.workrailSessionId is the
-              // branded SessionId populated by buildSessionResult from state.workrailSessionId.
-              // The typed result is the single source of truth; the sidecar is for crash recovery only.
-              const gateWorkrailSessionId = result.workrailSessionId;
-
-              const artifactContext = {
-                stepId,
-                workflowId: workflowTrigger.workflowId,
-                goal: workflowTrigger.goal,
-              };
-              const verdict = await evaluateGate(
-                {
-                  spawnSession: (wfId, goal, workspace, context, agentConfig) =>
-                    deps.spawnSession(wfId, goal, workspace, context, agentConfig),
-                  awaitSessions: (handles, timeoutMs) => deps.awaitSessions(handles, timeoutMs),
-                  getAgentResult: (handle) => deps.getAgentResult(handle),
-                  stderr: (line) => process.stderr.write(line + '\n'),
-                  readStepOutput: (wrSessionId) => deps.getAgentResult(wrSessionId),
-                },
-                artifactContext,
-                DEFAULT_GATE_EVALUATOR_WORKFLOW_ID,
-                workflowTrigger.workspacePath,
-                stepId,
-                gateWorkrailSessionId,
-                undefined, // criteria
-                DEFAULT_GATE_EVAL_TIMEOUT_MS,
-              );
-
-              // Escalate uncertain or rejected verdicts to the operator outbox.
-              // WHY here (not in resumeFromGate): resumeFromGate resumes regardless of verdict --
-              // the agent receives the verdict in its firstStepPrompt and decides how to proceed.
-              // Operator escalation is a coordinator-layer concern, not an engine concern.
-              if (verdict.verdict === 'uncertain') {
-                await deps.postToOutbox(
-                  `Gate evaluation uncertain for step '${stepId}' in session ${sessionId}. ` +
-                  `Reason: ${verdict.rationale}`,
-                  { sessionId, stepId, workflowId: workflowTrigger.workflowId, verdict: verdict.verdict, confidence: verdict.confidence },
-                );
-              }
-
-              const resumeResult = await resumeFromGate(
-                sessionId,
-                verdict,
-                ctx,
-                apiKey,
-                this.runWorkflowFn,
-                undefined,
-                emitter,
-                activeSessionSet,
-              );
-
-              if (resumeResult.kind === 'err') {
-                console.warn(
-                  `[TriggerRouter] Gate resume failed for session ${sessionId}: ${resumeResult.error.message}`,
-                );
-                await deps.postToOutbox(
-                  `Gate session ${sessionId} could not be resumed: ${resumeResult.error.message}`,
-                  { sessionId, stepId, workflowId: workflowTrigger.workflowId, error: resumeResult.error.kind },
-                );
-              } else {
-                console.log(
-                  `[TriggerRouter] Gate resumed: triggerId=${trigger.id} sessionId=${sessionId} ` +
-                  `verdict=${verdict.verdict}`,
-                );
-              }
-            } catch (e) {
-              console.error(
-                `[TriggerRouter] Gate evaluation threw for session ${sessionId}: ` +
-                `${e instanceof Error ? e.message : String(e)}`,
+              void (async () => {
+                try {
+                  const gateWorkrailSessionId = result.workrailSessionId;
+                  const artifactContext = {
+                    stepId,
+                    workflowId: workflowTrigger.workflowId,
+                    goal: workflowTrigger.goal,
+                  };
+                  const verdict = await evaluateGate(
+                    {
+                      spawnSession: (wfId, goal, workspace, context, agentConfig) =>
+                        deps.spawnSession(wfId, goal, workspace, context, agentConfig),
+                      awaitSessions: (handles, timeoutMs) => deps.awaitSessions(handles, timeoutMs),
+                      getAgentResult: (handle) => deps.getAgentResult(handle),
+                      stderr: (line) => process.stderr.write(line + '\n'),
+                      readStepOutput: (wrSessionId) => deps.getAgentResult(wrSessionId),
+                    },
+                    artifactContext,
+                    DEFAULT_GATE_EVALUATOR_WORKFLOW_ID,
+                    workflowTrigger.workspacePath,
+                    stepId,
+                    gateWorkrailSessionId,
+                    undefined,
+                    DEFAULT_GATE_EVAL_TIMEOUT_MS,
+                  );
+                  if (verdict.verdict === 'uncertain') {
+                    await deps.postToOutbox(
+                      `Gate evaluation uncertain for step '${stepId}' in session ${sessionId}. ` +
+                      `Reason: ${verdict.rationale}`,
+                      { sessionId, stepId, workflowId: workflowTrigger.workflowId, verdict: verdict.verdict, confidence: verdict.confidence },
+                    );
+                  }
+                  const resumeResult = await resumeFromGate(
+                    sessionId, verdict, ctx, apiKey, this.runWorkflowFn, undefined, emitter, activeSessionSet,
+                  );
+                  if (resumeResult.kind === 'err') {
+                    console.warn(`[TriggerRouter] Gate resume failed for session ${sessionId}: ${resumeResult.error.message}`);
+                    await deps.postToOutbox(
+                      `Gate session ${sessionId} could not be resumed: ${resumeResult.error.message}`,
+                      { sessionId, stepId, workflowId: workflowTrigger.workflowId, error: resumeResult.error.kind },
+                    );
+                  } else {
+                    console.log(`[TriggerRouter] Gate resumed: triggerId=${trigger.id} sessionId=${sessionId} verdict=${verdict.verdict}`);
+                  }
+                } catch (e) {
+                  console.error(`[TriggerRouter] Gate evaluation threw for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+                }
+              })();
+            } else {
+              console.warn(
+                `[TriggerRouter] coordinator_eval gate parked but coordinatorDeps not available -- cannot evaluate. ` +
+                `workflowId=${trigger.workflowId} sessionId=${sessionId}`,
               );
             }
-          })();
-        } else {
-          // coordinatorDeps not set -- gate evaluation requires coordinator infrastructure.
-          // This should not happen in production (coordinatorDeps is always set when
-          // WORKRAIL_TRIGGERS_ENABLED=true), but log clearly if it does.
-          console.warn(
-            `[TriggerRouter] Gate parked but coordinatorDeps not available -- cannot evaluate. ` +
-            `workflowId=${trigger.workflowId} sessionId=${sessionId}`,
-          );
+            break;
+          }
+          case 'human_approval': {
+            // Human approval gate: the operator is the evaluator. Skip wr.gate-eval-generic.
+            // Read the session's wr.review_verdict artifacts and create the GitHub draft review.
+            // The operator publishing the draft IS the gate verdict.
+            // WHY fire-and-forget: draft creation + poller are long-running.
+            // WHY originalResult as success: build a synthetic success result so
+            // maybeRunPostWorkflowActions can read lastStepArtifacts.
+            // The session artifacts are read from the session store via workrailSessionId.
+            const workrailSessionId = result.workrailSessionId;
+            if (workrailSessionId && this.ctx.v2) {
+              const sessionStore = this.ctx.v2.sessionStore;
+              void (async () => {
+                try {
+                  // Read artifacts from the session store.
+                  const loadResult = await sessionStore.loadValidatedPrefix(workrailSessionId);
+                  if (loadResult.isErr()) {
+                    console.warn(`[TriggerRouter] human_approval gate: could not load session ${String(workrailSessionId)}: ${loadResult.error.message}`);
+                    return;
+                  }
+                  const { projectArtifactsV2 } = await import('../v2/projections/artifacts.js');
+                  const { asSortedEventLog } = await import('../v2/durable-core/sorted-event-log.js');
+                  const sortedResult = asSortedEventLog(loadResult.value.truth.events);
+                  if (sortedResult.isErr()) return;
+                  const artifactsRes = projectArtifactsV2(sortedResult.value);
+                  const lastStepArtifacts: unknown[] = [];
+                  if (artifactsRes.isOk()) {
+                    for (const nodeArtifacts of Object.values(artifactsRes.value.byNodeId)) {
+                      for (const a of nodeArtifacts.artifacts) { lastStepArtifacts.push(a.content); }
+                    }
+                  }
+                  const syntheticSuccess: import('../daemon/types.js').WorkflowRunSuccess = {
+                    _tag: 'success',
+                    workflowId: workflowTrigger.workflowId,
+                    stopReason: 'gate_human_approval',
+                    lastStepArtifacts,
+                    sessionId: result.sessionId as import('../daemon/daemon-events.js').RunId,
+                  };
+                  await maybeRunPostWorkflowActions(
+                    workflowTrigger,
+                    syntheticSuccess,
+                    this._reviewApprovalAdapter,
+                    this.notificationService,
+                    this.ctx,
+                    trigger.id,
+                  );
+                } catch (e) {
+                  console.error(`[TriggerRouter] human_approval gate action threw for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+                }
+              })();
+            } else {
+              // workrailSessionId should always be set for daemon sessions -- this is a defensive
+              // fallback. Post to outbox so the operator has an observable signal.
+              console.warn(
+                `[TriggerRouter] human_approval gate: workrailSessionId or ctx.v2 unavailable. ` +
+                `workflowId=${trigger.workflowId} sessionId=${sessionId}`,
+              );
+              if (this._coordinatorDeps) {
+                void this._coordinatorDeps.postToOutbox(
+                  `human_approval gate session ${sessionId} could not create draft review: workrailSessionId or ctx.v2 unavailable.`,
+                  { sessionId, stepId, workflowId: workflowTrigger.workflowId },
+                );
+              }
+            }
+            break;
+          }
+          default:
+            assertNever(gateKind);
         }
       } else {
         // Compile-time exhaustiveness guard. If WorkflowRunResult gains a new variant
@@ -1059,7 +1158,7 @@ export class TriggerRouter {
       // Post-workflow review actions: create a PENDING draft review when reviewerIdentity is set.
       // Uses workflowTrigger (which carries reviewerIdentity forwarded from TriggerDefinition).
       // Uses originalResult to avoid callbackUrl delivery_failed suppressing review posting.
-      await maybeRunPostWorkflowActions(workflowTrigger, originalResult, this._reviewApprovalAdapter, this.notificationService);
+      await maybeRunPostWorkflowActions(workflowTrigger, originalResult, this._reviewApprovalAdapter, this.notificationService, this.ctx, trigger.id);
     });
 
     return { _tag: 'enqueued', triggerId: trigger.id };
@@ -1153,57 +1252,101 @@ export class TriggerRouter {
       } else if (result._tag === 'gate_parked') {
         const sessionId = result.sessionId;
         const stepId = result.stepId;
+        const gateKind = result.gateKind;
         console.log(
           `[TriggerRouter] Dispatch parked at gate: workflowId=${workflowTrigger.workflowId} ` +
-          `stepId=${stepId} sessionId=${sessionId}`,
+          `stepId=${stepId} sessionId=${sessionId} gateKind=${gateKind}`,
         );
-        if (sessionId && this._coordinatorDeps) {
-          const deps = this._coordinatorDeps;
-          const ctx = this.ctx;
-          const apiKey = this.apiKey;
-          const activeSessionSet = this._activeSessionSet;
-          const emitter = this.emitter;
-          void (async () => {
-            try {
-              const gateWorkrailSessionId = result.workrailSessionId;
-              const artifactContext = { stepId, workflowId: workflowTrigger.workflowId, goal: workflowTrigger.goal };
-              const verdict = await evaluateGate(
-                {
-                  spawnSession: (wfId, goal, workspace, context, agentConfig) =>
-                    deps.spawnSession(wfId, goal, workspace, context, agentConfig),
-                  awaitSessions: (handles, timeoutMs) => deps.awaitSessions(handles, timeoutMs),
-                  getAgentResult: (handle) => deps.getAgentResult(handle),
-                  stderr: (line) => process.stderr.write(line + '\n'),
-                  readStepOutput: (wrSessionId) => deps.getAgentResult(wrSessionId),
-                },
-                artifactContext,
-                DEFAULT_GATE_EVALUATOR_WORKFLOW_ID,
-                workflowTrigger.workspacePath,
-                stepId,
-                gateWorkrailSessionId,
-                undefined,
-                DEFAULT_GATE_EVAL_TIMEOUT_MS,
-              );
-              if (verdict.verdict === 'uncertain') {
-                await deps.postToOutbox(
-                  `Gate evaluation uncertain for step '${stepId}' in session ${sessionId}. Reason: ${verdict.rationale}`,
-                  { sessionId, stepId, workflowId: workflowTrigger.workflowId, verdict: verdict.verdict, confidence: verdict.confidence },
-                );
-              }
-              const resumeResult = await resumeFromGate(sessionId, verdict, ctx, apiKey, this.runWorkflowFn, undefined, emitter, activeSessionSet);
-              if (resumeResult.kind === 'err') {
-                console.warn(`[TriggerRouter] Dispatch gate resume failed for session ${sessionId}: ${resumeResult.error.message}`);
-                await deps.postToOutbox(
-                  `Gate session ${sessionId} could not be resumed: ${resumeResult.error.message}`,
-                  { sessionId, stepId, workflowId: workflowTrigger.workflowId, error: resumeResult.error.kind },
-                );
-              } else {
-                console.log(`[TriggerRouter] Dispatch gate resumed: sessionId=${sessionId} verdict=${verdict.verdict}`);
-              }
-            } catch (e) {
-              console.error(`[TriggerRouter] Dispatch gate evaluation threw: ${e instanceof Error ? e.message : String(e)}`);
+        switch (gateKind) {
+          case 'coordinator_eval': {
+            if (sessionId && this._coordinatorDeps) {
+              const deps = this._coordinatorDeps;
+              const ctx = this.ctx;
+              const apiKey = this.apiKey;
+              const activeSessionSet = this._activeSessionSet;
+              const emitter = this.emitter;
+              void (async () => {
+                try {
+                  const gateWorkrailSessionId = result.workrailSessionId;
+                  const artifactContext = { stepId, workflowId: workflowTrigger.workflowId, goal: workflowTrigger.goal };
+                  const verdict = await evaluateGate(
+                    {
+                      spawnSession: (wfId, goal, workspace, context, agentConfig) =>
+                        deps.spawnSession(wfId, goal, workspace, context, agentConfig),
+                      awaitSessions: (handles, timeoutMs) => deps.awaitSessions(handles, timeoutMs),
+                      getAgentResult: (handle) => deps.getAgentResult(handle),
+                      stderr: (line) => process.stderr.write(line + '\n'),
+                      readStepOutput: (wrSessionId) => deps.getAgentResult(wrSessionId),
+                    },
+                    artifactContext,
+                    DEFAULT_GATE_EVALUATOR_WORKFLOW_ID,
+                    workflowTrigger.workspacePath,
+                    stepId,
+                    gateWorkrailSessionId,
+                    undefined,
+                    DEFAULT_GATE_EVAL_TIMEOUT_MS,
+                  );
+                  if (verdict.verdict === 'uncertain') {
+                    await deps.postToOutbox(
+                      `Gate evaluation uncertain for step '${stepId}' in session ${sessionId}. Reason: ${verdict.rationale}`,
+                      { sessionId, stepId, workflowId: workflowTrigger.workflowId, verdict: verdict.verdict, confidence: verdict.confidence },
+                    );
+                  }
+                  const resumeResult = await resumeFromGate(sessionId, verdict, ctx, apiKey, this.runWorkflowFn, undefined, emitter, activeSessionSet);
+                  if (resumeResult.kind === 'err') {
+                    console.warn(`[TriggerRouter] Dispatch gate resume failed for session ${sessionId}: ${resumeResult.error.message}`);
+                    await deps.postToOutbox(
+                      `Gate session ${sessionId} could not be resumed: ${resumeResult.error.message}`,
+                      { sessionId, stepId, workflowId: workflowTrigger.workflowId, error: resumeResult.error.kind },
+                    );
+                  } else {
+                    console.log(`[TriggerRouter] Dispatch gate resumed: sessionId=${sessionId} verdict=${verdict.verdict}`);
+                  }
+                } catch (e) {
+                  console.error(`[TriggerRouter] Dispatch gate evaluation threw: ${e instanceof Error ? e.message : String(e)}`);
+                }
+              })();
             }
-          })();
+            break;
+          }
+          case 'human_approval': {
+            const workrailSessionId = result.workrailSessionId;
+            if (workrailSessionId && this.ctx.v2) {
+              const sessionStore = this.ctx.v2.sessionStore;
+              void (async () => {
+                try {
+                  const loadResult = await sessionStore.loadValidatedPrefix(workrailSessionId);
+                  if (loadResult.isErr()) return;
+                  const { projectArtifactsV2 } = await import('../v2/projections/artifacts.js');
+                  const { asSortedEventLog } = await import('../v2/durable-core/sorted-event-log.js');
+                  const sortedResult = asSortedEventLog(loadResult.value.truth.events);
+                  if (sortedResult.isErr()) return;
+                  const artifactsRes = projectArtifactsV2(sortedResult.value);
+                  const lastStepArtifacts: unknown[] = [];
+                  if (artifactsRes.isOk()) {
+                    for (const nodeArtifacts of Object.values(artifactsRes.value.byNodeId)) {
+                      for (const a of nodeArtifacts.artifacts) {
+                        lastStepArtifacts.push(a.content);
+                      }
+                    }
+                  }
+                  const syntheticSuccess: import('../daemon/types.js').WorkflowRunSuccess = {
+                    _tag: 'success',
+                    workflowId: workflowTrigger.workflowId,
+                    stopReason: 'gate_human_approval',
+                    lastStepArtifacts,
+                    sessionId: result.sessionId as import('../daemon/daemon-events.js').RunId,
+                  };
+                  await maybeRunPostWorkflowActions(workflowTrigger, syntheticSuccess, this._reviewApprovalAdapter, this.notificationService, this.ctx);
+                } catch (e) {
+                  console.error(`[TriggerRouter] Dispatch human_approval gate threw: ${e instanceof Error ? e.message : String(e)}`);
+                }
+              })();
+            }
+            break;
+          }
+          default:
+            assertNever(gateKind);
         }
       } else {
         // Compile-time exhaustiveness guard. If WorkflowRunResult gains a new variant
@@ -1223,7 +1366,7 @@ export class TriggerRouter {
       // Post-workflow review actions: create a PENDING draft review when reviewerIdentity is set.
       // reviewerIdentity is forwarded from TriggerDefinition onto WorkflowTrigger so this path
       // can access it without a triggerId lookup.
-      await maybeRunPostWorkflowActions(workflowTrigger, result, this._reviewApprovalAdapter, this.notificationService);
+      await maybeRunPostWorkflowActions(workflowTrigger, result, this._reviewApprovalAdapter, this.notificationService, this.ctx);
     });
     return workflowTrigger.workflowId;
   }

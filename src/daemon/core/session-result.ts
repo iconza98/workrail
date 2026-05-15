@@ -144,6 +144,7 @@ export function buildSessionResult(
         workflowId: trigger.workflowId,
         gateToken: signal.gateToken,
         stepId: signal.stepId,
+        gateKind: signal.gateKind,
         stopReason: 'gate_parked',
         sessionId: String(sessionId),
         ...(state.workrailSessionId !== null ? { workrailSessionId: state.workrailSessionId } : {}),
@@ -198,5 +199,9 @@ export function buildSessionResult(
     ...(sessionWorktreePath !== undefined ? { sessionWorkspacePath: sessionWorktreePath } : {}),
     ...(sessionWorktreePath !== undefined ? { sessionId } : {}),
     ...(trigger.botIdentity !== undefined ? { botIdentity: trigger.botIdentity } : {}),
+    // WHY: maybeRunPostWorkflowActions() needs the WorkRail session ID to start the
+    // PendingDraftReviewPoller and write review_draft_submitted events. Without this
+    // the poller guard is always false and submission is never detected.
+    ...(state.workrailSessionId !== null ? { workrailSessionId: state.workrailSessionId } : {}),
   };
 }

@@ -195,6 +195,88 @@ The delivery pipeline was extracted into `delivery-pipeline.ts` with explicit st
 
 ## WorkTrain Daemon
 
+### Local LLM support: use Gemma, Llama, or any Ollama-compatible model as the agent backend (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 13** | Cor:2 Cap:3 Eff:2 Lev:3 Con:3 | Blocked: no
+
+WorkTrain currently supports two backends: Anthropic direct (`ANTHROPIC_API_KEY`) and Amazon Bedrock (`AWS_PROFILE`). Both are cloud APIs with per-token costs, rate limits, and latency. A local LLM backend would enable: offline operation, zero API cost for iteration and testing, privacy for sensitive codebases, and much faster iteration cycles on workflow development.
+
+**What this looks like:** `agentConfig.model: "ollama/llama3.2"` or `agentConfig.model: "ollama/gemma3:4b"` in triggers.yml. The daemon detects the `ollama/` prefix, constructs an Ollama-compatible HTTP client, and uses it as the `AgentClientInterface` instead of `AnthropicBedrock` or `Anthropic`.
+
+**Implementation path:** `AgentClientInterface` in `agent-loop.ts` is already duck-typed -- it only requires `messages.create(params, options)` returning `Promise<Anthropic.Message>`. Ollama's `/api/chat` endpoint with `stream: false` can be wrapped in a thin adapter that maps to this interface. The key translation: Ollama uses OpenAI-style tool calling format, not Anthropic's `tool_use` content blocks -- the adapter needs to normalize this.
+
+**Where it fits:** `buildAgentClient()` in `src/daemon/core/agent-client.ts` parses `agentConfig.model` and constructs the right client. Adding an `ollama/` prefix case there is the natural extension point. No changes needed to AgentLoop, runWorkflow, or any workflow definitions.
+
+**Things to hash out:**
+- Ollama tool calling quality varies significantly by model -- Llama 3.2 and Gemma 3 support tool use but reliability is lower than Claude. How does WorkTrain handle an agent that frequently hallucinates tool names or ignores tool results?
+- Context window size: local models typically have 4K-8K context vs. Claude's 200K. Long `wr.mr-review` sessions that read many files may hit the limit mid-session. Need a warning or graceful degradation when context is near capacity.
+- The `stallTimeoutSeconds` default (120s) is calibrated for Claude response times. Local models on consumer hardware can be much slower or much faster -- the default should be overridable and local models may need a higher default.
+
+---
+
+### worktrain session-log: readable turn-by-turn replay of any session (May 15, 2026)
+
+**Status: idea** | Priority: CRITICAL
+
+**Score: 16** | Cor:3 Cap:3 Eff:3 Lev:3 Con:4 | Blocked: no
+
+Without this, debugging stalled or failed sessions means grepping through raw JSONL files and guessing. Every hour spent trying to understand why a session hung is an hour that could be spent fixing real problems. This is the single highest-leverage observability gap.
+
+`worktrain session-log <sessionId>` -- reads the conversation JSONL and session event log for any session (live or completed) and renders them as a human-readable, time-annotated turn-by-turn log:
+
+```
+[13:21:04] Turn 1   → Bash: cd /worktrees/abc && gh pr diff 1022   [started]
+[13:21:06] Turn 1   ← Bash: 847 lines  [2.1s]
+[13:21:06] Turn 1   → Bash: cat src/trigger/types.ts   [started]
+[13:21:08] Turn 1   ← Bash: (4203 chars)  [1.8s]
+[13:21:12] Turn 2   → complete_step  [started]
+[13:21:13] Turn 2   ADVANCE: phase-0 → phase-0b  [0.9s]
+[13:22:45] Turn 3   → spawn_agent: { agents: [{ workflowId: wr.discovery... }] }  [started]
+[13:24:52] Turn 3   ← spawn_agent: outcome=error  [127s] ← SLOW
+[13:24:52] Turn 3   → Bash: ...  [started]
+[13:26:48] STALL ABORT: no LLM call started in 120s (last call started 13:24:52, tool still in flight)
+```
+
+Key: timestamps per turn, duration per tool call, which call hung (marked SLOW or still-in-flight at abort time), step advances with notes, and the final outcome.
+
+**Why I can read this myself:** when a session stalls and gets killed, I run `worktrain session-log <id>` and immediately see which turn hung, which tool was in flight, and what the agent said just before. No more guessing.
+
+**Also needed: `--follow` flag** for live tailing. Same output, just streams as new lines are appended to the conversation log. Foundation for the console Live tab.
+
+**Implementation:** new CLI command `src/cli/commands/worktrain-session-log.ts`, ~150 lines. Reads `~/.workrail/daemon-sessions/<id>-conversation.jsonl` (turn data) and `~/.workrail/data/sessions/<sessionId>/events/*.jsonl` (step advances, stalls). The daemon session UUID maps to the WorkRail session ID via the sidecar file.
+
+---
+
+### Verify reviewer-assigned MR review feature end-to-end (May 15, 2026)
+
+**Status: active** | Priority: CRITICAL
+
+**Score: 16** | Cor:3 Cap:3 Eff:3 Lev:3 Con:4 | Blocked: no
+
+We have never successfully completed a full end-to-end run of the reviewer-assigned MR review feature. Every attempt so far has stalled mid-session due to hung Bedrock calls before reaching the `human_approval` gate. We don't know if the gate routing works, if the draft review gets created, if the poller starts, or if the macOS notification fires. Until we see this work once, we're shipping untested infrastructure.
+
+**What needs to happen:**
+1. A `wr.mr-review` session runs on a real PR to completion (reaches phase-6 final handoff)
+2. The `human_approval` gate fires (not `coordinator_eval` -- verify this in session events)
+3. `maybeRunPostWorkflowActions()` reads `wr.review_verdict` from session artifacts
+4. `GitHubReviewApprovalAdapter.createDraftReview()` posts a PENDING draft to GitHub
+5. The operator sees "Finish your review" in GitHub with real findings
+6. Operator publishes the draft
+7. `PendingDraftReviewPoller` detects submission within 60s
+8. `review_draft_submitted` event appears in the session event log
+9. macOS notification fires at draft creation
+
+**Blockers to clear first:**
+- `worktrain session-log` command (adjacent entry above) -- needed to diagnose any future stalls
+- Per-call timeout in AgentLoop -- prevents hung Bedrock calls from blocking indefinitely
+- Consider using Sonnet instead of Haiku for this verification run -- fewer stalls, confirms the pipeline works before optimizing cost
+
+**Success signal:** a real pending draft review visible under your GitHub account on PR #1022, with findings that reflect the actual code in the PR.
+
+---
+
 ### Large-comment smell detection during implementation (May 8, 2026)
 
 **Status: idea** | Priority: medium
@@ -2970,6 +3052,199 @@ Simplify third-party and team workflow hookup by requiring explicit `workspacePa
 
 ## Console
 
+### Actionable blocked responses: tell the agent exactly what to fix, not just that it failed (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 13** | Cor:3 Cap:3 Eff:2 Lev:2 Con:3 | Blocked: no
+
+When the engine blocks an advance (output contract not satisfied, validation criteria failed, required field missing), the agent receives a generic error message. It knows something is wrong but not what specifically needs to change. The result is wasted turns where the agent retries with variations that still fail, or gives up and produces a different kind of wrong output.
+
+Every blocked response should be actionable: tell the agent the exact schema expected, what was provided, and the precise call needed to fix it.
+
+**Examples of current vs. better:**
+
+Output contract failure:
+- Current: `"output contract not satisfied: wr.review_verdict required"`
+- Better: `"Phase 6 requires a wr.review_verdict artifact in complete_step's artifacts[] parameter. Your last call provided 0 artifacts. Required schema: { kind: 'wr.review_verdict', verdict: 'clean'|'minor'|'blocking', confidence: 'high'|'medium'|'low', findings: [...], summary: '...' }. Call complete_step again with this artifact."`
+
+Validation criteria failure:
+- Current: `"validation criterion not met"`
+- Better: `"Criterion: 'build must pass'. Evidence required: Bash output showing 0 TypeScript errors. Provide this evidence in your notes before advancing."`
+
+Required field missing:
+- Current: `"missing required field"`
+- Better: `"The wr.review_verdict artifact is missing required field 'findings'. Include an empty array if there are no findings: findings: []"`
+
+**Implementation:** the blocked response is built in `src/mcp/handlers/v2-advance-core/outcome-blocked.ts`. It currently surfaces validation results as-is. Enriching it with schema context (from the outputContract's contractRef, resolved against the artifact schemas) and diff context (what was provided vs. what was required) is the targeted change.
+
+**Things to hash out:**
+- How much schema detail is useful vs. noisy? A full JSON schema dump of `wr.review_verdict` is too long. The agent needs the minimum to fix the call -- field names, types, and a concrete example.
+- Should the blocked message include the agent's previous call so it can see the diff? "You called complete_step with artifacts: [] -- add the wr.review_verdict object."
+
+---
+
+### Full session lifecycle management: real status, cleanup, and operator control (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 15** | Cor:3 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
+
+WorkTrain has all the data needed to know exactly what every session is doing at any moment -- it just doesn't surface it. The session event log has precise state: which step is active, how many LLM turns have been taken, whether a Bedrock call is in flight, whether the agent is waiting on a spawn_agent child, whether a gate is parked. Instead of inferring "probably stuck" from "no step advance in 60 minutes", the operator should be able to see exactly what's happening and act on it.
+
+**What this covers:**
+
+**Precise session status** (not guesses):
+- `running:turn_N` -- agent loop active, turn N of current step, last LLM call started X seconds ago
+- `running:awaiting_child` -- spawn_agent in flight, waiting on N child sessions
+- `running:bedrock_call` -- Bedrock API call in progress, started X seconds ago (visible when call is hung)
+- `gate_parked:human_approval` -- parked at human_approval gate, draft review created, waiting for publish
+- `gate_parked:coordinator_eval` -- parked at coordinator gate, evaluator session running
+- `completed:success` / `completed:error` / `completed:stuck` / `completed:timeout` -- terminal states with full detail
+- `orphaned` -- process died, token still valid, eligible for resume
+
+**Session management actions** (from console or CLI):
+- `worktrain session kill <id>` -- abort the agent loop cleanly, write a terminal event, clean up sidecar and worktree
+- `worktrain session archive <id>` -- mark completed sessions as archived so they don't clutter the console
+- `worktrain session resume <id>` -- manually trigger recovery for an orphaned session
+- `worktrain session retry <id>` -- re-fire the workflow from the beginning with the same goal and trigger context (useful when a session died on a transient error)
+- Bulk cleanup: archive all sessions older than N days, kill all stuck sessions, etc.
+
+**Console improvements:**
+- Status badges on every session in the list: not just "active/complete" but the precise state above
+- Real-time status updates for active sessions without requiring a page refresh
+- Filter by status: show only running, only stuck, only gate-parked, only errored
+- Session detail shows the current LLM turn count, wall-clock time per step, which child sessions are running
+- "Kill" and "Archive" buttons on each session card
+
+**The data exists.** `DaemonEventEmitter` fires `tool_called`, `step_advanced`, `session_completed` on every event. The `ActivityRegistry` (or equivalent) tracks which sessions are in the active set. The session sidecar has `workflowId`, `goal`, `worktreePath`. The gap is plumbing this into the console's session list projection and adding the management endpoints.
+
+**Things to hash out:**
+- What is the right source for real-time "is this session currently making a Bedrock call" -- the `onLlmTurnStarted` callback in `AgentLoop` fires before each call, but the console reads from the session store. Bridging the two requires either a separate in-process state map or a new "heartbeat" event kind written to the session log on each LLM call start.
+- Session cleanup for worktrees: killing a session that used `branchStrategy: 'worktree'` or `read-only` needs to clean up the worktree on disk -- the kill action should trigger `git worktree remove`.
+- Archive vs delete: archived sessions should be queryable (for audit, for learning from edits) but not shown by default. Delete should require explicit confirmation.
+
+---
+
+### Perfect, no-nonsense session resumption after crash or hang (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 15** | Cor:3 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
+
+When the daemon crashes or a session is killed (network hang, OOM, SIGTERM, machine sleep), sessions with meaningful progress should resume automatically and transparently on the next daemon start. No data loss, no need for the operator to intervene, no re-firing webhooks.
+
+The current state: crash recovery exists and works for some failure modes (clean process crash with a valid sidecar). It fails for hung-call kills because the sidecar's `continueToken` may not reflect the latest state if the process died mid-Bedrock-call before the token was updated. The operator currently has to notice the session died, figure out why, and re-fire manually.
+
+**What "perfect" looks like:**
+- Daemon starts → silently scans for orphaned sessions → resumes each one with 0 operator input
+- Operator sees the session in the console continuing from where it left off, not restarted from scratch
+- No ceremony: the session store is the source of truth, the sidecar is just the handshake token. As long as the token is valid, the agent loop restarts directly from the current step.
+- Failed resume (expired token, corrupted sidecar) surfaces a clear notification: "Session X could not be resumed -- re-fire required" rather than silently discarding
+- Metrics: track resume success rate; a high discard rate means the sidecar write is not durable enough
+
+**Key gaps to close:**
+1. **Sidecar durability during hung calls**: the `continueToken` sidecar should be written atomically on every step advance AND on every token update (already done), but the "last written before the hang" case needs to be validated at recovery time -- the token must still be valid in the store, not just present on disk
+2. **Per-call timeout** (see adjacent backlog entry): prevents the hung-call case entirely by aborting stalled Bedrock requests before they require a process kill
+3. **Resume notification**: when a session is resumed at startup, emit a macOS notification and log entry so the operator knows it happened
+4. **Clear failure message**: when a session cannot be resumed (token expired, store inconsistency), write to outbox with session ID, workflow, goal, and the reason -- enough for the operator to re-fire with context
+
+---
+
+### Stall timer must apply to in-flight Bedrock calls, not just inter-call gaps (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 14** | Cor:3 Cap:2 Eff:3 Lev:3 Con:3 | Blocked: no
+
+The current stall detection in `AgentLoop` (`stallTimeoutMs`) fires when no new LLM API call has *started* within the configured window. It resets each time `client.messages.create()` is about to be called. But if a Bedrock call *starts* and then hangs indefinitely (the HTTP request is in flight but never returns -- network issue, Bedrock internal error, throttle without a response), the stall timer never fires because the next call never starts. The session holds its queue slot until `maxSessionMinutes` expires.
+
+This is the actual cause of sessions sitting silent for 10+ minutes: the hung Bedrock call is not covered by the stall timer's guard.
+
+**The fix:** the stall timer should also fire if a single Bedrock API call exceeds a configured per-call timeout. Concretely: start a per-call timer just before `client.messages.create()` and cancel it when the call returns (success or error). If the timer fires, cancel the AbortController and treat it as a stall. The per-call timeout can be shorter than `stallTimeoutSeconds` (e.g. 90s per call vs 120s between calls) or configured separately.
+
+**Implementation:** `AgentLoop._runLoop()` already has the stall timer mechanism (`stallTimeoutMs`). Adding a per-call `AbortSignal` with a timeout, or wrapping `client.messages.create()` in a `Promise.race` with a timeout promise, would close the gap. The `AbortController` approach is cleaner since the SDK accepts an AbortSignal in request options.
+
+**Things to hash out:**
+- What is the right per-call timeout? Haiku can legitimately take 90s on a complex response. Sonnet can take longer. The timeout should be model-tier-aware, or at minimum configurable via `agentConfig.callTimeoutSeconds`.
+- Should a per-call timeout count as a stall (same abort path) or as a retryable error (try again once before aborting)?
+
+---
+
+### Bedrock credential expiry detection and re-auth notification (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 14** | Cor:3 Cap:3 Eff:3 Lev:2 Con:3 | Blocked: no
+
+AWS SSO credentials expire every ~8 hours. When they expire mid-session, `AnthropicBedrock()` throws `Could not load credentials from any providers` and the session dies silently. The operator only discovers this by noticing sessions stopped completing or by checking the terminal.
+
+**What's needed:**
+- Detect Bedrock credential errors specifically at the agent-client or agent-loop level (they manifest as SDK errors before any API call returns, distinct from model errors or API 400s)
+- On detection: fire a macOS notification "WorkTrain needs AWS re-auth -- run: aws sso login --profile <profile>" and write to the outbox so `worktrain inbox` surfaces it
+- Optionally: retry the session automatically after a configurable delay (to allow the operator to re-authenticate without losing the session)
+
+**Refresh behavior:** `AnthropicBedrock()` reads from `~/.aws/sso/cache/` on each call -- so refreshing SSO while the daemon is running (`aws sso login`) is picked up automatically without a daemon restart. The notification just needs to tell the operator to do that.
+
+**Implementation:** detect in `buildAgentClient()` or in the agent loop error handler in `agent-loop.ts` -- the credential error surfaces as a non-200 response from the SDK before any model call succeeds. Tag it as a distinct `WorkflowRunError` reason code (`credential_expired`) so the operator outbox message is specific.
+
+---
+
+### Parent-child session tree in console: link spawned sessions to their parent (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 13** | Cor:3 Cap:2 Eff:3 Lev:2 Con:3 | Blocked: no
+
+When `spawn_agent` creates child sessions, `session_created.data.parentSessionId` is written to the session store. The data is already there. The console currently shows all sessions as a flat list, so a `wr.mr-review` run producing 8-10 parallel reviewer family sessions looks like unrelated noise.
+
+**What's needed:** read `parentSessionId` from `session_created` events in the session list projection and render child sessions nested under their parent in the console UI. At minimum, each child session should show "child of `<parentId>`" and be visually grouped or indented under the parent. A tree view would be ideal.
+
+**Two display modes worth supporting:**
+1. **Grouped/nested**: child sessions indented under parent in the session list, collapsed by default, expanding on click. Shows the full spawn tree for complex pipelines.
+2. **Parent indicator on child**: simpler fallback -- each child session shows a "↳ spawned by `<parentId>`" badge and a link to jump to the parent session.
+
+**Implementation notes:** `parentSessionId` is written on the `session_created` event's `data` field. The console session list endpoint (`GET /api/v2/sessions`) reads the session store -- adding a `parentSessionId` field to `ConsoleSessionSummary` is the entry point. The UI change is additive on top of that.
+
+**Things to hash out:**
+- Should orphaned children (parent session already deleted/archived) show a greyed-out parent indicator or no indicator at all?
+- The tree can be arbitrarily deep (spawn_agent allows up to depth 3 by default). Does the UI need to handle 3-level nesting, or is 1-level (parent → direct children) sufficient for now?
+
+---
+
+### Live turn-level log stream for active sessions (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 13** | Cor:3 Cap:2 Eff:3 Lev:2 Con:3 | Blocked: no
+
+The console shows step-level progress (which workflow phase the session is on) but nothing at the turn level: which tool the agent called, what it returned, how long it took, what the agent said between tool calls. Diagnosing a slow or stuck session currently requires grepping through raw conversation JSONL files -- not practical while a session is live.
+
+**What's needed:** a `worktrain logs --follow <sessionId>` CLI command (and/or a "Live" tab in the console) that streams tool-call-level activity as it happens:
+
+```
+[09:52:14] Turn 12  Bash       → cd /worktrees/abc && npx vitest run
+[09:52:31] Turn 12  Bash       ← exit 0, 396 tests pass  [17s]
+[09:52:31] Turn 13  complete_step → phase-2-scope-and-completeness
+[09:52:31] ADVANCE  phase-2 → phase-3-state-hypothesis
+[09:53:02] Turn 14  Bash       → gh pr diff 1022
+[09:53:04] Turn 14  Bash       ← 847 lines  [2s]
+```
+
+**The data already exists.** `DaemonEventEmitter` fires `tool_called`, `tool_error`, `step_advanced`, and `session_completed` events on every turn. The conversation JSONL captures every message. The gap is purely presentation -- nothing consumes these events into a human-readable live feed.
+
+**Two surfaces:**
+1. `worktrain logs --follow <sessionId>` -- CLI command, streams to stdout, pipe-friendly. Reads from the daemon event stream (JSONL file in `~/.workrail/data/`) and tails it in real time.
+2. Console "Live" tab -- same data in the browser, auto-updating without refresh. Especially useful for long-running sessions where you want to keep an eye without a terminal.
+
+**Things to hash out:**
+- How much of the tool output to show inline vs. truncate? A `gh pr diff` result is 800 lines; showing all of it destroys the log readability. Proposal: first 3 lines + byte count for long outputs; full output available via `--verbose`.
+- Should `worktrain logs` work for completed sessions too (replay)? Yes -- same format, just not tailing. `worktrain logs <sessionId>` (no `--follow`) replays the full conversation history in readable form.
+- LLM text output between tool calls: show it? Yes, but dim/indented. The agent's reasoning is valuable for debugging wrong decisions.
+- Should the console Live tab replace the existing session detail view or augment it? Augment -- step-level detail stays, Live tab adds the turn-level stream as a separate tab.
+
+---
+
 ### Workflows tab: incorrect source attribution for bundled workflows (Apr 21, 2026)
 
 **Status: bug** | Priority: low
@@ -3872,6 +4147,124 @@ Open questions: does `wr.dispatch` replace `workflowId` in trigger config, or co
 - Should `wr.dispatch` be visible to users as a selectable workflow in `list_workflows`, or is it infrastructure that only the coordinator and trigger config use?
 - `wr.quick-task` deliberately skips review and design gates. Who is responsible for ensuring it is only used for tasks where skipping those gates is safe?
 - How does `wr.dispatch` handle tasks that could fit multiple workflows (e.g. "investigate and fix this bug" spans `wr.bug-investigation` and `wr.coding-task`)?
+
+---
+
+### worktrain review <pr-number>: one-off PR review CLI command (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 13** | Cor:3 Cap:2 Eff:3 Lev:3 Con:2 | Blocked: no
+
+There is no simple way to trigger a review of a specific PR without either setting up polling triggers or hand-crafting a JSON webhook payload with the branch name, PR number, and URL manually. This is too much friction for ad-hoc reviews.
+
+**The fix:** `worktrain review <pr-number>` -- a CLI command that:
+1. Calls `gh pr view <pr-number> --json number,title,headRefName,url,baseRefName` to fetch PR metadata
+2. Constructs the correct `WorkflowTrigger` with all required context fields (`itemNumber`, `itemUrl`, `prBranch`) already populated
+3. Dispatches `wr.mr-review` (or the workflow selected by `routeReviewWorkflow()`) via `TriggerRouter.dispatch()` with `branchStrategy: 'read-only'`
+4. If `reviewerIdentity` is configured in `~/.workrail/config.json`, creates the draft review and starts the poller automatically
+5. Prints a link to the WorkTrain Console session so the operator can watch progress
+
+**Optional flags:**
+- `--workflow wr.production-readiness-audit` -- override workflow selection
+- `--no-draft` -- run the review but don't create a GitHub draft (just log findings to the console)
+- `--repo owner/repo` -- specify repo explicitly (default: current directory's git remote)
+
+**Why this matters:** the polling triggers handle the automated case (assigned PRs fire automatically), but operators need a simple way to say "review this PR right now" for ad-hoc cases -- PRs not assigned to them, PRs they want a second pass on, or just testing the review pipeline. A single command with no config required (besides having the daemon running) is the right UX.
+
+**Implementation:** new `src/cli/commands/worktrain-review.ts` following the same pattern as `worktrain-spawn.ts`. Uses `gh pr view` via `execFile` for PR metadata, then calls into the daemon dispatch path.
+
+**Things to hash out:**
+- Should this require the daemon to be running, or should it spin up a one-shot session directly? Running through the daemon is cleaner (uses the full pipeline including sidecar write and poller) but requires the daemon. A direct `runWorkflow()` call without the daemon is simpler for scripts. Proposal: daemon-required for the full feature (draft review, poller); add a `--standalone` flag for environments without a running daemon.
+- When `reviewerIdentity` is not configured, should `--no-draft` be the implicit default, or should the command error out asking you to configure it?
+
+---
+
+### Self-review before merge: WorkTrain runs review families on its own PRs and fixes blocking findings (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 15** | Cor:3 Cap:3 Eff:3 Lev:3 Con:3 | Blocked: no
+
+When WorkTrain opens a PR through the autonomous pipeline, it currently hands off immediately after `gh pr create`. A human reviewer is then expected to catch issues. This breaks the self-improvement loop: WorkTrain's coding quality is only as good as the review bar it applies to others, and right now it doesn't apply that bar to itself before shipping.
+
+**The fix:** after creating a PR, the coordinator runs the same review workflows (via `spawn_agent`) on WorkTrain's own output before considering the task done. If findings are `clean` or `minor` with no blockers, the PR is considered shippable. If findings are `blocking`, WorkTrain spawns a fix session, applies the changes to the same worktree branch, pushes the amendment, and re-reviews. This loop continues until findings are clean or a configured retry limit is hit, at which case it escalates to the operator outbox.
+
+**Why this is different from the reviewer-assigned feature:** the reviewer feature posts findings as draft comments under the operator's identity for human PRs. This feature fixes findings autonomously on WorkTrain's own PRs -- no posting, no approval gate, just code changes. The output is a clean PR, not a review comment.
+
+**Already partially implemented:** the adaptive pipeline coordinator already has a review phase and a fix-iteration loop in `full-pipeline.ts`. What's missing is (a) routing the review findings back into the worktree rather than creating a new branch, and (b) running the full review family (prod audit, arch audit, mr-review) not just `wr.mr-review`.
+
+**Things to hash out:**
+- What is the right retry cap before escalating? Two fix iterations seems right -- if the coding agent can't fix blocking findings in two attempts, a human needs to look.
+- Should the fix sessions run in the same worktree as the coding session, or a fresh worktree branched from the PR branch? Same worktree is simpler; fresh worktree is cleaner if the fix touches many files.
+- How does WorkTrain distinguish a pre-existing issue on main from a regression it introduced? The diff is the boundary: only findings anchored to changed lines are WorkTrain's responsibility to fix. Pre-existing issues in unchanged code get filed as backlog items, not fixed in this PR.
+- What happens to the fix commits in the PR history? They should be squashable -- the PR should tell the story of the feature, not the internal review-fix iterations.
+
+---
+
+### PR lifecycle management: babysit any PR from open to merged (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 14** | Cor:3 Cap:3 Eff:3 Lev:3 Con:2 | Blocked: no
+
+Everything between "PR opened" and "PR merged" is currently invisible to WorkTrain. CI fails silently. Reviewers request changes and nobody responds. The PR goes stale. A rebase conflict appears and blocks merge. Even for PRs WorkTrain opens autonomously, a human has to watch and intervene.
+
+This entry covers the full lifecycle management capability -- for both WorkTrain-created PRs and any PR the operator explicitly asks WorkTrain to babysit.
+
+**Scope:**
+
+1. **CI failure handling**: poll CI status on open PRs. On failure, read the failing job logs, determine root cause, spawn a fix session, push to the PR branch, re-trigger CI. If the failure is flaky (same test fails intermittently with no code change), flag it as infrastructure noise rather than a code problem.
+
+2. **Reviewer comment resolution**: poll for new review comments on the PR. Classify each comment: (a) actionable change requested → spawn fix session, apply, push, reply "Done"; (b) question or discussion → draft a response for operator approval before posting; (c) nitpick / style → apply automatically if it's a clear single-line fix, otherwise defer to operator. Never post responses autonomously without operator approval for non-trivial content.
+
+3. **Rebase on conflict**: when the PR branch falls behind main and has merge conflicts, fetch main, rebase, resolve conflicts deterministically where possible (ours vs. theirs based on context), push force-with-lease. If conflicts are non-trivial, flag for operator.
+
+4. **Re-review requests**: after pushing fixes, re-request review from the original reviewers so they know the PR is ready for another look.
+
+5. **Stale PR detection**: if a PR has been open for N days with no activity from reviewers, ping the reviewer(s) or escalate to the operator outbox.
+
+6. **Non-WorkTrain PRs**: the operator can assign WorkTrain to any PR (via reviewer assignment, a comment trigger like `/worktrain babysit`, or explicit dispatch) and WorkTrain takes over lifecycle management from that point.
+
+**Trigger mechanism:** a `github_prs_poll` trigger with `authorLogin` filter (the operator or WorkTrain's bot account) scoped to the operator's repos. WorkTrain polls for PRs in states that need action (CI failing, changes requested, behind main, review overdue) and dispatches a lifecycle management session for each.
+
+**Things to hash out:**
+- What is the right polling interval for lifecycle management vs. review? CI failure is time-sensitive (minutes); stale PR detection is not (hours). Different intervals per event type.
+- Responding to reviewer comments requires posting as the operator -- same `reviewerIdentity` mechanism as the draft review feature. No posting without approval for substantive responses.
+- For flaky CI: how many consecutive failures on the same test across different commits before WorkTrain declares it infrastructure noise vs. a real regression?
+- Force-push for rebases requires `--force-with-lease` and a CI re-trigger. Should WorkTrain do this autonomously or always request operator approval first? Proposal: autonomous for clean rebases (no conflicts); operator approval required for conflict resolution.
+- What is the right retry limit for the CI fix loop before escalating? Three attempts seems right -- if WorkTrain can't fix a CI failure in three tries, a human needs to look.
+
+---
+
+### Multi-workflow reviewer: route PRs to prod audit, arch audit, or mr-review based on context (May 15, 2026)
+
+**Status: idea** | Priority: high
+
+**Score: 14** | Cor:3 Cap:3 Eff:3 Lev:3 Con:2 | Blocked: no
+
+The reviewer-assigned MR review feature currently hardcodes `wr.mr-review` as the review workflow. But `wr.production-readiness-audit` and `wr.architecture-scalability-audit` exist and are suited to different kinds of PRs. A dependency bump needs a different lens than a core engine change. A PR touching the daemon's session lock needs different scrutiny than a documentation update.
+
+**The opportunity:** when a PR is assigned to you, WorkTrain should choose the right workflow (or combination) based on what the PR actually changes -- not always run the same generalist review. Deeper, more targeted findings with less noise.
+
+**Routing signals (static, zero LLM turns -- same principle as `routeTask()` in the adaptive pipeline):**
+- `wr.production-readiness-audit`: PRs touching runtime paths -- daemon, trigger system, agent loop, session store, delivery pipeline. High blast radius if broken.
+- `wr.architecture-scalability-audit`: PRs changing interfaces, type contracts, module boundaries, or core domain types.
+- `wr.mr-review`: general correctness, completeness vs. requirements, test coverage. The default fallback and the only one that checks "was the right thing implemented?"
+- Multiple workflows: large PRs touching multiple concerns -- run in parallel, merge findings into one `wr.review_verdict`, organize the draft review body by workflow.
+- Skip / lightweight: dependency bumps, docs-only, chore commits -- no draft review created, or a one-line summary comment only.
+
+**Implementation shape:**
+- New optional `reviewWorkflowId` field on `TriggerDefinition` -- explicit per-trigger override. When absent, the router auto-selects.
+- New `routeReviewWorkflow(pr, trigger): string[]` pure function (in `src/coordinators/routing/`) that maps PR metadata to one or more workflow IDs via file path patterns and diff shape. No LLM.
+- When multiple workflows are selected, each runs as a parallel `spawn_agent` child under a thin coordinator session that merges findings into a single `wr.review_verdict`.
+- Draft review body is organized by workflow: "**Production readiness** (3 findings) ... **Architecture** (1 finding)..."
+
+**Things to hash out:**
+- What file path patterns cleanly identify runtime vs. interface vs. general? `src/daemon/`, `src/v2/durable-core/` for runtime; `src/*/types.ts`, `src/v2/ports/` for interfaces. Worth auditing the codebase to validate coverage before shipping.
+- When multiple workflows run in parallel and produce conflicting severity assessments, how are they merged? Proposal: highest severity wins at the `wr.review_verdict` level; all individual findings are surfaced in the draft body.
+- For the skip/lightweight case, should WorkTrain post "no findings" as a draft review (so the author sees acknowledgment) or skip posting entirely? Skipping is less noisy.
+- Should the routing decision be visible to the operator? Yes -- log it as a `review_workflow_routed` signal so the operator can see why `wr.production-readiness-audit` was chosen.
 
 ---
 
