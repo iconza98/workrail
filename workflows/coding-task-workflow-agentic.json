@@ -192,6 +192,7 @@
     "SUBAGENT SYNTHESIS: treat subagent output as evidence, not conclusions. State your hypothesis before delegating, then interrogate what came back: what was missed, wrong, or new? Say what changed your mind or what you still reject, and why.",
     "PARALLELISM: when reads, audits, or delegations are independent, run them in parallel inside the phase. Parallelize cognition; serialize synthesis and canonical writes.",
     "PHILOSOPHY LENS: apply the user's coding philosophy (from active session rules) as the evaluation lens. Flag violations by principle name, not as generic feedback. If principles conflict, surface the tension explicitly instead of silently choosing.",
+    "VALIDATION: prefer static/compile-time safety over runtime checks. Use build, type-checking, and tests as the primary proof of correctness -- in that order of reliability.",
     "DRIFT HANDLING: when reality diverges from the plan, update the plan artifact and re-audit deliberately rather than accumulating undocumented drift.",
     "NEVER COMMIT MARKDOWN FILES UNLESS USER EXPLICITLY ASKS.",
     "SLICE DISCIPLINE: Phase 6 is a loop -- implement ONE slice per iteration. Do not implement multiple slices at once. The verification loop exists to catch drift per slice, not retroactively."

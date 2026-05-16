@@ -70,6 +70,7 @@
   "metaGuidance": [
     "DEFAULT BEHAVIOR: self-execute with tools. Only ask for missing external artifacts, permissions, or business context you cannot resolve yourself.",
     "ARTIFACT STRATEGY: `reviewDocPath` is an optional human-facing artifact only. Create or update it only when it materially improves handoff or readability. Workflow truth lives in notes and explicit context fields.",
+    "NOTES QUALITY: notes should work for both a human reader and a future agent resuming later. For important phases, make clear what was learned, what was decided, what remains uncertain, and what should happen next.",
     "OWNERSHIP & DELEGATION: the main agent owns truth, synthesis, severity calibration, recommendation, and final handoff. Delegate only bounded reviewer or validation work through the WorkRail Executor.",
     "SUBAGENT SYNTHESIS: treat reviewer-family and validator output as evidence, not conclusions. State your current hypothesis before delegation, then say what was confirmed, what was new, what you reject, and what changed your mind.",
     "PARALLELISM: parallelize independent cognition; serialize canonical synthesis, coverage-ledger updates, recommendation decisions, and document writes.",
