@@ -1,16 +1,16 @@
 {
-  "name": "@exaudeus/workrail",
-  "version": "3.93.0",
+  "name": "@ikani.samani/workrail",
+  "version": "1.0.0",
   "description": "Step-by-step workflow enforcement for AI agents via MCP",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/EtienneBBeaulac/workrail.git"
+    "url": "git+https://github.com/ikani/workrail.git"
   },
   "bugs": {
-    "url": "https://github.com/EtienneBBeaulac/workrail/issues"
+    "url": "https://github.com/ikani/workrail/issues"
   },
-  "homepage": "https://github.com/EtienneBBeaulac/workrail#readme",
+  "homepage": "https://github.com/ikani/workrail#readme",
   "bin": {
     "workrail": "dist/mcp-server.js",
     "worktrain": "dist/cli-worktrain.js"

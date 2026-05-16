@@ -7,10 +7,7 @@
     "workrail": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"],
-      "env": {
-        "WORKFLOW_STORAGE_PATH": "/Users/etienneb/.cg/dist/workflows"
-      }
+      "args": ["-y", "@ikani.samani/workrail"]
     }
   }
 }
