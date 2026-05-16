@@ -97,10 +97,10 @@ export const FEATURE_FLAG_DEFINITIONS: ReadonlyArray<FeatureFlagDefinition> = [
   {
     key: 'cleanResponseFormat',
     envVar: 'WORKRAIL_CLEAN_RESPONSE_FORMAT',
-    defaultValue: false,
+    defaultValue: true,
     description: 'Use clean response format that removes system scaffolding from step prompts to improve agent authority perception',
     since: '0.11.0',
-    stable: false,
+    stable: true,
   },
   {
     key: 'devMode',

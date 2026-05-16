@@ -337,8 +337,14 @@ export function formatAssessmentRequirementsForTest(
   return formatAssessmentRequirements(assessments as readonly AssessmentDefinition[]);
 }
 
+/**
+ * @param suppressExample - When true, omits the canonical JSON format example.
+ *   Set to true after the first assessed step in a session so the example is
+ *   shown only once rather than repeated on every gate step.
+ */
 function formatAssessmentRequirements(
-  assessments: readonly AssessmentDefinition[]
+  assessments: readonly AssessmentDefinition[],
+  suppressExample?: boolean,
 ): readonly string[] {
   if (assessments.length === 0) return [];
 
@@ -355,17 +361,19 @@ function formatAssessmentRequirements(
     for (const dimension of assessment.dimensions) {
       requirements.push(`  ${dimension.id} (${dimension.levels.join(' | ')}): ${dimension.purpose}`);
     }
-    // Canonical format example: use actual assessment id and first dimension to make it
-    // immediately actionable. Follows the wr.loop_control pattern in formatOutputContractRequirements.
-    // Note: dimensions is a Record<string, string | {level, rationale}>, NOT an array.
-    const firstDimension = assessment.dimensions[0];
-    const exampleDimValue = firstDimension ? `"${firstDimension.levels[0] ?? 'high'}"` : '"high"';
-    const exampleDimKey = firstDimension ? `"${firstDimension.id}"` : '"dimensionId"';
-    requirements.push(
-      `Canonical format:\n\`\`\`json\n` +
-      `{ "artifacts": [{ "kind": "wr.assessment", "assessmentId": "${assessment.id}", "dimensions": { ${exampleDimKey}: ${exampleDimValue} } }] }\n` +
-      `\`\`\``
-    );
+    // Canonical format example: shown on first assessed step only.
+    // suppressExample is true after the session has prior notes (agent already saw the format).
+    if (!suppressExample) {
+      // Note: dimensions is a Record<string, string | {level, rationale}>, NOT an array.
+      const firstDimension = assessment.dimensions[0];
+      const exampleDimValue = firstDimension ? `"${firstDimension.levels[0] ?? 'high'}"` : '"high"';
+      const exampleDimKey = firstDimension ? `"${firstDimension.id}"` : '"dimensionId"';
+      requirements.push(
+        `Canonical format:\n\`\`\`json\n` +
+        `{ "artifacts": [{ "kind": "wr.assessment", "assessmentId": "${assessment.id}", "dimensions": { ${exampleDimKey}: ${exampleDimValue} } }] }\n` +
+        `\`\`\``
+      );
+    }
     requirements.push('Use only canonical dimension levels. If the engine rejects the artifact, correct the submitted levels instead of inventing new ones.');
   }
   return requirements;
@@ -624,7 +632,16 @@ export function renderPendingPrompt(args: {
       : `\n\n**OUTPUT REQUIREMENTS (System):**\n${contractRequirements.map(r => `- ${r}`).join('\n')}`
     : '';
 
-  const assessmentRequirements = formatAssessmentRequirements(stepAssessments);
+  // Compute hasPriorNotes once — reused by both the assessment section (to suppress the
+  // canonical format example on repeat appearances) and the notes section (to shorten guidance
+  // after step 1). O(1) when precomputedIndex is available; O(n) event scan otherwise.
+  const hasPriorNotes = args.precomputedIndex
+    ? args.precomputedIndex.hasPriorNotesByRunId.has(String(args.runId))
+    : hasPriorNotesInRun({ truth: args.truth, runId: args.runId });
+
+  // Suppress the canonical format JSON example after the first assessed step in the session.
+  // The agent has already seen the format; repeating it on every gate step is pure token waste.
+  const assessmentRequirements = formatAssessmentRequirements(stepAssessments, hasPriorNotes);
   const assessmentSection = assessmentRequirements.length > 0
     ? cleanResponseFormat
       ? `\n\n${assessmentRequirements.map(r => `- ${r}`).join('\n')}`
@@ -647,10 +664,6 @@ export function renderPendingPrompt(args: {
       return '';  // Notes reminder handled in the response formatter footer
     }
 
-    // Use pre-computed index when available to skip the hasPriorNotesInRun .some() scan.
-    const hasPriorNotes = args.precomputedIndex
-      ? args.precomputedIndex.hasPriorNotesByRunId.has(String(args.runId))
-      : hasPriorNotesInRun({ truth: args.truth, runId: args.runId });
     if (hasPriorNotes && !args.rehydrateOnly) {
       return '\n\n**NOTES REQUIRED (System):** Include `output.notesMarkdown` when advancing.\n\n' +
         'Scope: this step only — WorkRail concatenates notes automatically.\n' +
