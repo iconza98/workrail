@@ -49,6 +49,7 @@
 - **[External Workflow Repositories](reference/external-workflow-repositories.md)** - Loading workflows from external sources
 - **[API Specification](../spec/mcp-api-v1.0.md)** - Complete API documentation
 - **[Configuration Reference](configuration.md)** - Environment variables, Git repos, paths
+- **[Security](security.md)** - Threat model, workflow trust, network and filesystem posture
 - **[Release Policy](reference/releases.md)** - Semantic-release behavior, major-version approval, and dry-run flows
 - **[Troubleshooting Guide](reference/troubleshooting.md)** - Common issues and solutions
 
