@@ -12,7 +12,7 @@
  */
 
 import { composeServer } from '../server.js';
-import { bindWithPortFallback } from './http-listener.js';
+import { bindWithPortFallback, DEFAULT_BIND_HOST } from './http-listener.js';
 import { wireShutdownHooks } from './shutdown-hooks.js';
 import { registerFatalHandlers, logStartup, registerGracefulShutdown } from './fatal-exit.js';
 import * as crypto from 'crypto';
@@ -21,6 +21,10 @@ import express from 'express';
 /** Inclusive upper bound for the HTTP port scan range. Scan starts at the requested port. */
 const HTTP_PORT_SCAN_END = 3199;
 
+/** Host names that are considered loopback-only. Binds to anything else
+ * trigger a startup warning because the MCP endpoint has no auth. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+
 export async function startHttpServer(port: number): Promise<void> {
   // Register early — before composeServer() — so startup failures exit cleanly.
   registerFatalHandlers('http');
@@ -28,12 +32,25 @@ export async function startHttpServer(port: number): Promise<void> {
 
   const { server, ctx } = await composeServer();
 
+  // Loopback by default; WORKRAIL_HTTP_HOST overrides. The MCP endpoint has no
+  // auth, so non-loopback binds expose every tool call to anyone who can reach
+  // the port. Surface that loudly at startup if someone opts in.
+  const host = (process.env.WORKRAIL_HTTP_HOST ?? DEFAULT_BIND_HOST).trim() || DEFAULT_BIND_HOST;
+  if (!LOOPBACK_HOSTS.has(host)) {
+    console.error(
+      `[Transport] WARNING: WORKRAIL_HTTP_HOST=${host} binds the MCP transport ` +
+      `beyond loopback. The endpoint has no authentication; any host that can ` +
+      `reach this port can call MCP tools as you. Set WORKRAIL_HTTP_HOST=127.0.0.1 ` +
+      `(default) unless you have an external authentication layer in front.`
+    );
+  }
+
   // Scan from the requested port up to HTTP_PORT_SCAN_END so a second
   // concurrent WorkRail instance can bind to a different port rather than
   // failing hard. createHttpListener() itself stays fail-fast; the scan
   // policy lives here at the transport entry point where it belongs.
   const scanEnd = Math.max(port, HTTP_PORT_SCAN_END);
-  const listener = await bindWithPortFallback(port, scanEnd);
+  const listener = await bindWithPortFallback(port, scanEnd, host);
 
   // Register graceful shutdown so that fatalExit() stops the MCP HTTP listener
   // cleanly before calling process.exit(1). The 3s timeout guarantees exit within a bounded window.
@@ -73,7 +90,7 @@ export async function startHttpServer(port: number): Promise<void> {
 
   const boundPort = listener.getBoundPort();
   console.error('[Transport] WorkRail MCP Server running on HTTP');
-  console.error(`[Transport] MCP endpoint: http://localhost:${boundPort}/mcp`);
+  console.error(`[Transport] MCP endpoint: http://${host}:${boundPort}/mcp`);
 
   // -------------------------------------------------------------------------
   // HTTP mode: no workspace roots
