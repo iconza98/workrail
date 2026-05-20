@@ -1,10 +1,19 @@
+// semantic-release configuration for the PDQ-internal fork.
+//
+// Publishes @pdq/workrail to GitHub Packages on every merge to main that
+// includes a feat / fix / perf / revert commit. The registry, scope, and
+// access level come from `publishConfig` in package.json so this file does
+// not have to know about them.
+//
+// Repository URL is inferred from package.json. Do NOT hardcode it here --
+// merging from upstream is easier when this file does not diverge.
+
 const allowMajorRelease = process.env.WORKRAIL_ALLOW_MAJOR_RELEASE === "true";
 const breakingReleaseType = allowMajorRelease ? "major" : "minor";
 
 module.exports = {
   branches: ["main"],
   tagFormat: "v${version}",
-  repositoryUrl: `https://x-access-token:${process.env.GITHUB_TOKEN}@github.com/EtienneBBeaulac/workrail.git`,
   plugins: [
     [
       "@semantic-release/commit-analyzer",
@@ -50,8 +59,18 @@ module.exports = {
     [
       "@semantic-release/exec",
       {
-        prepareCmd: "npm pkg set version=${nextRelease.version}",
-        publishCmd: "npm publish --access public"
+        // semantic-release/npm reads the version from package.json, so we
+        // still need to write it before publishing.
+        prepareCmd: "npm pkg set version=${nextRelease.version}"
+      }
+    ],
+    [
+      "@semantic-release/npm",
+      {
+        // tarballDir + npmPublish=true: the npm plugin reads publishConfig
+        // from package.json, so the GitHub Packages registry and "restricted"
+        // access are honoured automatically.
+        npmPublish: true
       }
     ],
     "@semantic-release/github"

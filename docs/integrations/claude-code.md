@@ -14,7 +14,7 @@ This guide covers setting up WorkRail with Claude Code (both Desktop and CLI).
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"]
+      "args": ["-y", "@pdq/workrail"]
     }
   }
 }
@@ -32,7 +32,7 @@ This guide covers setting up WorkRail with Claude Code (both Desktop and CLI).
 cd /path/to/your/project
 
 # Add WorkRail MCP server
-claude mcp add workrail npx -y @exaudeus/workrail
+claude mcp add workrail npx -y @pdq/workrail
 ```
 
 This creates/updates `.claude.json` in your project root.
@@ -49,7 +49,7 @@ Edit or create `.claude.json` in your project root:
         "workrail": {
           "type": "stdio",
           "command": "npx",
-          "args": ["-y", "@exaudeus/workrail"],
+          "args": ["-y", "@pdq/workrail"],
           "env": {}
         }
       }
@@ -74,7 +74,7 @@ To use custom workflows, add environment variables:
         "workrail": {
           "type": "stdio",
           "command": "npx",
-          "args": ["-y", "@exaudeus/workrail"],
+          "args": ["-y", "@pdq/workrail"],
           "env": {
             "WORKFLOW_STORAGE_PATH": "/path/to/custom/workflows",
             "WORKFLOW_GIT_REPOS": "https://github.com/your-org/workflows.git",
@@ -199,7 +199,7 @@ Please use the workrail-executor agent to run the wr.bug-investigation workflow
 
 ```bash
 # Check what WorkRail sees
-npx @exaudeus/workrail list
+npx @pdq/workrail list
 
 # Verify custom paths
 ls -la ~/.workrail/workflows/
