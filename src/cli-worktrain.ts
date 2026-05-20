@@ -89,7 +89,7 @@ program
             const answer = await rl.question(question);
             return answer.trim() || (defaultValue ?? '');
           },
-          mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, opts),
+          mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, { ...opts, mode: 0o700 }),
           readFile: (p: string) => fs.promises.readFile(p, 'utf-8'),
           writeFile: (p: string, content: string) => fs.promises.writeFile(p, content, 'utf-8'),
           exists: async (p: string) => {
@@ -184,7 +184,7 @@ program
       {
         appendFile: (p: string, content: string) =>
           fs.promises.appendFile(p, content, 'utf-8'),
-        mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, opts),
+        mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, { ...opts, mode: 0o700 }),
         homedir: os.homedir,
         joinPath: path.join,
         print: (line: string) => console.log(line),
@@ -213,7 +213,7 @@ program
       {
         readFile: (p: string) => fs.promises.readFile(p, 'utf-8'),
         writeFile: (p: string, content: string) => fs.promises.writeFile(p, content, 'utf-8'),
-        mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, opts),
+        mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, { ...opts, mode: 0o700 }),
         homedir: os.homedir,
         joinPath: path.join,
         print: (line: string) => console.log(line),
@@ -503,7 +503,7 @@ async function buildDaemonDeps(): Promise<import('./cli/commands/worktrain-daemo
     nodeBinPath: process.execPath,
     homedir: os.homedir,
     joinPath: path.join,
-    mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, opts),
+    mkdir: (p: string, opts: { recursive: boolean }) => fs.promises.mkdir(p, { ...opts, mode: 0o700 }),
     writeFile: (p: string, content: string) => fs.promises.writeFile(p, content, 'utf-8'),
     chmod: (p: string, mode: number) => fs.promises.chmod(p, mode),
     readFile: (p: string) => fs.promises.readFile(p, 'utf-8'),

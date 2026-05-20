@@ -65,7 +65,7 @@ program
   .action(async (options: { config?: boolean }) => {
     if (options.config) {
       const result = await executeInitConfigCommand({
-        mkdir: (p, opts) => fs.promises.mkdir(p, opts),
+        mkdir: (p, opts) => fs.promises.mkdir(p, { ...opts, mode: 0o700 }),
         readFile: (p) => fs.promises.readFile(p, 'utf-8'),
         writeFile: (p, content) => fs.promises.writeFile(p, content, 'utf-8'),
         homedir: os.homedir,
@@ -76,7 +76,7 @@ program
     }
 
     const result = await executeInitCommand({
-      mkdir: (p, opts) => fs.promises.mkdir(p, opts),
+      mkdir: (p, opts) => fs.promises.mkdir(p, { ...opts, mode: 0o700 }),
       readdir: (p) => fs.promises.readdir(p),
       writeFile: (p, content) => fs.promises.writeFile(p, content, 'utf-8'),
       homedir: os.homedir,

@@ -14,7 +14,7 @@ export async function initializeUserWorkflowDirectory(): Promise<string> {
   const userDir = path.join(os.homedir(), '.workrail', 'workflows');
   
   try {
-    await fs.mkdir(userDir, { recursive: true });
+    await fs.mkdir(userDir, { recursive: true, mode: 0o700 });
     
     const entries = await fs.readdir(userDir);
     if (entries.length === 0) {

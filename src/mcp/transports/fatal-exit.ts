@@ -70,7 +70,7 @@ const CRASH_LOG_MAX_BYTES = 512 * 1024; // 512 KB — rotate at this size
  */
 function writeCrashLog(label: string, reason: unknown): void {
   try {
-    mkdirSync(join(homedir(), '.workrail'), { recursive: true });
+    mkdirSync(join(homedir(), '.workrail'), { recursive: true, mode: 0o700 });
 
     // Rotate if oversized — truncate to empty so the file doesn't grow forever
     try {

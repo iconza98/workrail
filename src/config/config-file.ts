@@ -148,7 +148,7 @@ export function ensureWorkrailConfigFile(): void {
     // File exists -- nothing to do.
   } catch {
     try {
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
       fs.writeFileSync(configPath, CONFIG_FILE_TEMPLATE, 'utf-8');
     } catch {
       // Best-effort -- if we can't write, carry on silently.
