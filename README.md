@@ -1,13 +1,15 @@
-# WorkRail (PDQ internal fork)
+# WorkRail (personal fork)
 
-This is PDQ's hardened internal fork of [WorkRail](https://github.com/EtienneBBeaulac/workrail),
+This is a personal hardened fork of [WorkRail](https://github.com/EtienneBBeaulac/workrail),
 a step-by-step workflow enforcement engine for AI agents delivered as an MCP
-server. It is published privately as `@pdq/workrail` and is intended for use on
-PDQ engineers' own machines.
+server. It is published publicly as `@ikani.samani/workrail` on the npm registry.
 
-If you want the public version, install `@exaudeus/workrail` from npmjs.org
-instead. This fork is configured for internal distribution and includes
-security defaults that may differ from upstream.
+If you want the upstream public version, install `@exaudeus/workrail` from
+npmjs.org instead.
+
+> **Note:** npm usernames cannot contain dots. If the registered scope ends
+> up being `@ikani-samani` rather than `@ikani.samani`, swap the package name
+> accordingly in the steps below.
 
 ## Prerequisites
 
@@ -15,45 +17,25 @@ security defaults that may differ from upstream.
   a minimum of Node 20, but CI runs against 22.14.0 and so should you.
 - **npm 11.11.1 or newer** (set in `package.json` via the `packageManager`
   field; `corepack` will activate it automatically).
-- **A GitHub Personal Access Token with `read:packages` scope**. Create one at
-  https://github.com/settings/tokens. Keep it long-lived; rotate it on the
-  same cadence you rotate the rest of your dev tokens.
 
 ## Install
 
-WorkRail is published to GitHub Packages, not the public npm registry. You
-need to configure npm to find the `@pdq` scope on the right registry before
-installing.
+```
+npm install -g @ikani.samani/workrail
+```
 
-1. Copy `.npmrc.example` to `~/.npmrc` (or to a project-local `./.npmrc`):
+No `.npmrc` configuration or authentication token is needed. The package is
+published publicly on the npm registry.
 
-   ```
-   cp .npmrc.example ~/.npmrc
-   ```
+## Verify
 
-2. Open it and replace `TOKEN` with your GitHub PAT. The file should look
-   like:
+```
+workrail --version
+```
 
-   ```
-   @pdq:registry=https://npm.pkg.github.com
-   //npm.pkg.github.com/:_authToken=ghp_xxxxxxxxxxxxxxxx
-   ```
-
-3. Install globally:
-
-   ```
-   npm install -g @pdq/workrail
-   ```
-
-4. Verify:
-
-   ```
-   workrail --version
-   ```
-
-   This should print the published package version. If npm reports `403
-   Forbidden`, your PAT is missing the `read:packages` scope or has not been
-   authorized for the PDQ org via SSO.
+This prints the published package version. If you see a `404 Not Found`,
+the package has not been published yet (a publish-time prerequisite is
+still outstanding).
 
 ## Wire up your MCP client
 
@@ -70,7 +52,7 @@ Add the server to `~/.claude.json` (or a project-local `.mcp.json`):
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@pdq/workrail"]
+      "args": ["-y", "@ikani.samani/workrail"]
     }
   }
 }
@@ -88,7 +70,7 @@ docs):
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@pdq/workrail"]
+      "args": ["-y", "@ikani.samani/workrail"]
     }
   }
 }
@@ -134,7 +116,7 @@ the console (`worktrain console` if you have it).
 Environment variables, workflow source paths, and config file format are
 documented in [`docs/configuration.md`](docs/configuration.md). The
 `env.example` at the repo root lists every variable WorkRail reads, with
-inline guidance on which ones are PDQ-specific defaults.
+inline guidance.
 
 ## Security posture
 
@@ -162,8 +144,8 @@ hot spots.
 ## Reporting issues
 
 File issues in the [`ikani-pdq/workrail`](https://github.com/ikani-pdq/workrail/issues)
-repository (or whichever PDQ-owned repo currently hosts the fork). Do not
-file PDQ-internal bugs against upstream.
+repository. Do not file bugs against upstream for issues that are specific to
+this fork.
 
 Do not include session manifests, keyring contents, or pasted credentials in
 issue reports.

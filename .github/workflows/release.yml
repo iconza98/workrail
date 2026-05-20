@@ -54,8 +54,6 @@ jobs:
       contents: write
       actions: read
       issues: write
-      # Required to publish @pdq/workrail to GitHub Packages.
-      packages: write
 
     steps:
       # TODO(pdq): upstream uses a GitHub App token to bypass branch protection
@@ -94,9 +92,9 @@ jobs:
         with:
           node-version: 22.14.0
           cache: 'npm'
-          # Publish target: GitHub Packages, under the @pdq scope.
-          registry-url: https://npm.pkg.github.com
-          scope: '@pdq'
+          # Publish target: public npm registry, under the @ikani.samani scope.
+          registry-url: https://registry.npmjs.org
+          scope: '@ikani.samani'
 
       - name: Install dependencies
         run: npm install --ignore-scripts
@@ -133,10 +131,11 @@ jobs:
         env:
           # semantic-release uses GITHUB_TOKEN for the @semantic-release/github
           # plugin (release notes, GitHub Releases). NODE_AUTH_TOKEN is what
-          # @semantic-release/npm reads to authenticate to GitHub Packages.
+          # @semantic-release/npm reads to authenticate to the npm registry.
+          # Add NPM_TOKEN to the repo secrets before the first release.
           GITHUB_TOKEN: ${{ steps.token.outputs.value }}
           GH_TOKEN: ${{ steps.token.outputs.value }}
-          NODE_AUTH_TOKEN: ${{ steps.token.outputs.value }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           WORKRAIL_ALLOW_MAJOR_RELEASE: ${{ vars.WORKRAIL_ALLOW_MAJOR_RELEASE }}
         run: |
           set -euo pipefail
@@ -216,8 +215,8 @@ jobs:
           VERSION="${POST_TAG#v}"
 
           # If the registry already has this version, keep the tag (avoid flip-flopping).
-          if npm view "@pdq/workrail@${VERSION}" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "Version ${VERSION} exists on GitHub Packages; keeping tag ${POST_TAG}"
+          if npm view "@ikani.samani/workrail@${VERSION}" version >/dev/null 2>&1; then
+            echo "Version ${VERSION} exists on npm; keeping tag ${POST_TAG}"
             echo "RELEASE_TAG_CLEANUP_STATUS=kept_published" >> "$GITHUB_ENV"
             echo "RELEASE_TAG_CLEANUP_TAG=${POST_TAG}" >> "$GITHUB_ENV"
             exit 0
