@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as net from 'net';
-import { createHttpListener, bindWithPortFallback } from '../../../src/mcp/transports/http-listener.js';
+import { createHttpListener, bindWithPortFallback, DEFAULT_BIND_HOST } from '../../../src/mcp/transports/http-listener.js';
 import fetch from 'node-fetch';
 
 /**
@@ -110,6 +110,30 @@ describe('HttpListener', () => {
     const response = await fetch(`http://localhost:${port}/test`);
     const data: any = await response.json();
     expect(data.message).toBe('test route');
+  });
+
+  it('defaults to binding the loopback address (127.0.0.1)', async () => {
+    expect(DEFAULT_BIND_HOST).toBe('127.0.0.1');
+    const listener = createHttpListener(0);
+    listeners.push(listener);
+    expect(listener.host).toBe('127.0.0.1');
+    await listener.start();
+
+    // After start, the listener must reject connections from non-loopback
+    // addresses on the host. We can't easily test "another machine" from here,
+    // but we can assert the listener exposes the requested host so regressions
+    // back to 0.0.0.0 are caught.
+    expect(listener.host).toBe('127.0.0.1');
+  });
+
+  it('honors an explicit host argument', async () => {
+    const listener = createHttpListener(0, '127.0.0.1');
+    listeners.push(listener);
+    expect(listener.host).toBe('127.0.0.1');
+    await listener.start();
+    const port = listener.getBoundPort()!;
+    const response = await fetch(`http://127.0.0.1:${port}/whatever`);
+    expect(response.status).toBe(404);
   });
 });
 

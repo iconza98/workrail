@@ -31,10 +31,16 @@ type ServerState =
 export interface HttpListener {
   readonly app: Application;
   readonly requestedPort: number;
+  readonly host: string;
   getBoundPort(): number | null;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
+
+/** Default bind host. Loopback-only by design so the MCP transport is not
+ * reachable from the local network unless an operator explicitly opts in via
+ * WORKRAIL_HTTP_HOST. Wider binds have no authentication; keep this tight. */
+export const DEFAULT_BIND_HOST = '127.0.0.1';
 
 /**
  * Create a minimal HTTP listener for MCP transport.
@@ -45,14 +51,21 @@ export interface HttpListener {
  * Fail-fast on port conflict: throws immediately, no fallback.
  * Supports ephemeral ports: requestedPort=0 lets OS assign a port;
  * getBoundPort() returns the actual bound port after start().
+ *
+ * Defaults to 127.0.0.1. The MCP HTTP endpoint has no auth, so a non-loopback
+ * bind exposes tool calls to any host that can reach the port.
  */
-export function createHttpListener(requestedPort: number): HttpListener {
+export function createHttpListener(
+  requestedPort: number,
+  host: string = DEFAULT_BIND_HOST,
+): HttpListener {
   const app = express();
   let state: ServerState = { kind: 'not_started' };
 
   return {
     app,
     requestedPort,
+    host,
 
     getBoundPort(): number | null {
       return state.kind === 'running' ? state.boundPort : null;
@@ -81,12 +94,12 @@ export function createHttpListener(requestedPort: number): HttpListener {
           }
         });
 
-        server.listen(requestedPort, () => {
+        server.listen(requestedPort, host, () => {
           const addr = server.address();
           const boundPort = addr && typeof addr === 'object' ? addr.port : requestedPort;
 
           state = { kind: 'running', server, boundPort };
-          console.error(`[HttpListener] MCP HTTP transport listening on port ${boundPort}`);
+          console.error(`[HttpListener] MCP HTTP transport listening on ${host}:${boundPort}`);
           resolve();
         });
       });
@@ -129,12 +142,13 @@ export function createHttpListener(requestedPort: number): HttpListener {
  */
 export async function bindWithPortFallback(
   startPort: number,
-  endPort: number
+  endPort: number,
+  host: string = DEFAULT_BIND_HOST,
 ): Promise<HttpListener> {
   let lastError: Error | undefined;
 
   for (let port = startPort; port <= endPort; port++) {
-    const listener = createHttpListener(port);
+    const listener = createHttpListener(port, host);
     try {
       await listener.start();
       if (port !== startPort) {

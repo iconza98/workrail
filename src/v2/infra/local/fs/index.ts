@@ -25,9 +25,21 @@ function mapFsError(e: unknown, filePath: string): FsError {
   return { code: 'FS_IO_ERROR', message: `FS error at ${filePath}: ${e instanceof Error ? e.message : String(e)}` };
 }
 
+/**
+ * Permission mode for all directories under ~/.workrail.
+ *
+ * Owner-only (rwx------) so that other local users cannot list or traverse
+ * session, keyring, or config directories. File mode is already 0o600 for
+ * sensitive writes; this closes the parent-directory enumeration hole.
+ */
+export const WORKRAIL_DIR_MODE = 0o700;
+
 export class NodeFileSystemV2 implements FileSystemPortV2 {
   mkdirp(dirPath: string): ResultAsync<void, FsError> {
-    return RA.fromPromise(fs.mkdir(dirPath, { recursive: true }).then(() => undefined), (e) => mapFsError(e, dirPath));
+    return RA.fromPromise(
+      fs.mkdir(dirPath, { recursive: true, mode: WORKRAIL_DIR_MODE }).then(() => undefined),
+      (e) => mapFsError(e, dirPath),
+    );
   }
 
   readFileUtf8(filePath: string): ResultAsync<string, FsError> {

@@ -162,7 +162,7 @@ export function createRingBufferSink(
  */
 export function createDiskPersistSink(perfFilePath: string, serverVersion: string): ToolCallTimingSink {
   // Create directory once at construction time -- sync is acceptable here (startup path, not hot path).
-  try { fs.mkdirSync(path.dirname(perfFilePath), { recursive: true }); } catch { /* ignore */ }
+  try { fs.mkdirSync(path.dirname(perfFilePath), { recursive: true, mode: 0o700 }); } catch { /* ignore */ }
 
   let warnedOnce = false;
   return (timing: ToolCallTiming): void => {

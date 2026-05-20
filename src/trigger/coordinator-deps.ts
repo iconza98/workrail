@@ -579,7 +579,7 @@ class CoordinatorDepsImpl implements AdaptiveCoordinatorDeps {
   async postToOutbox(message: string, metadata: Readonly<Record<string, unknown>>): Promise<void> {
     const workrailDir = path.join(os.homedir(), '.workrail');
     const outboxPath = path.join(workrailDir, 'outbox.jsonl');
-    await fs.promises.mkdir(workrailDir, { recursive: true });
+    await fs.promises.mkdir(workrailDir, { recursive: true, mode: 0o700 });
     const entry = JSON.stringify({ id: randomUUID(), message, metadata, timestamp: new Date().toISOString() });
     await fs.promises.appendFile(outboxPath, entry + '\n', 'utf-8');
   }
@@ -739,7 +739,7 @@ class CoordinatorDepsImpl implements AdaptiveCoordinatorDeps {
     const worktreePath = path.join(os.homedir(), '.workrail', 'worktrees', runId);
     const branchName = `worktrain/${runId}`;
     try {
-      await fs.promises.mkdir(path.join(os.homedir(), '.workrail', 'worktrees'), { recursive: true });
+      await fs.promises.mkdir(path.join(os.homedir(), '.workrail', 'worktrees'), { recursive: true, mode: 0o700 });
       await this.execFileAsync('git', ['-C', workspace, 'fetch', 'origin', baseBranch], {});
       await this.execFileAsync('git', ['-C', workspace, 'worktree', 'add', worktreePath, '-b', branchName, `origin/${baseBranch}`], {});
       return ok(worktreePath);
