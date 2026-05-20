@@ -62,7 +62,7 @@ For most users, no configuration is needed. Just add WorkRail to your MCP client
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"]
+      "args": ["-y", "@pdq/workrail"]
     }
   }
 }
@@ -117,7 +117,7 @@ Load workflows from GitHub, GitLab, Bitbucket, or any Git repository.
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"],
+      "args": ["-y", "@pdq/workrail"],
       "env": {
         "WORKFLOW_GIT_REPOS": "https://github.com/your-org/workflows.git",
         "GITHUB_TOKEN": "ghp_xxxx"
@@ -272,7 +272,7 @@ Logs go to **stderr** (stdout is reserved for MCP protocol).
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"],
+      "args": ["-y", "@pdq/workrail"],
       "env": {
         "WORKRAIL_LOG_LEVEL": "INFO"
       }
@@ -328,7 +328,7 @@ File: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) 
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"]
+      "args": ["-y", "@pdq/workrail"]
     }
   }
 }
@@ -339,7 +339,7 @@ File: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) 
 The CLI has per-project configuration. Use `claude mcp add`:
 
 ```bash
-claude mcp add workrail npx -y @exaudeus/workrail
+claude mcp add workrail npx -y @pdq/workrail
 ```
 
 This creates/updates `.claude.json` in your project root. To configure environment variables:
@@ -352,7 +352,7 @@ This creates/updates `.claude.json` in your project root. To configure environme
         "workrail": {
           "type": "stdio",
           "command": "npx",
-          "args": ["-y", "@exaudeus/workrail"],
+          "args": ["-y", "@pdq/workrail"],
           "env": {
             "WORKFLOW_STORAGE_PATH": "/path/to/custom/workflows"
           }
@@ -419,7 +419,7 @@ File: `.cursor/mcp.json` in your project
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"],
+      "args": ["-y", "@pdq/workrail"],
       "cwd": "/path/to/your/project"
     }
   }
@@ -433,7 +433,7 @@ File: `.cursor/mcp.json` in your project
   "mcpServers": {
     "workrail": {
       "command": "npx",
-      "args": ["-y", "@exaudeus/workrail"],
+      "args": ["-y", "@pdq/workrail"],
       "env": {
         "WORKFLOW_STORAGE_PATH": "/path/to/custom/workflows",
         "WORKFLOW_GIT_REPOS": "https://github.com/team/workflows.git",
@@ -466,7 +466,7 @@ File: `.cursor/mcp.json` in your project
 
 ```bash
 # Check what sources are active
-WORKRAIL_LOG_LEVEL=DEBUG npx @exaudeus/workrail
+WORKRAIL_LOG_LEVEL=DEBUG npx @pdq/workrail
 
 # Verify your custom path exists
 ls -la ~/.workrail/workflows/
