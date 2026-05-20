@@ -4,6 +4,12 @@
 
 import { defineConfig } from 'vitest/config';
 
+// Windows runners are roughly 2x slower than Linux for the same git and
+// filesystem-heavy tests (clone, fork-harness, rehydrate). Multiply the
+// default timeouts on win32 so legitimately-slow tests do not flake out
+// the matrix while still surfacing real deadlocks within a bounded window.
+const isWindows = process.platform === 'win32';
+
 const shared = {
   // Setup files
   setupFiles: ['./tests/setup.ts'],
@@ -14,9 +20,10 @@ const shared = {
   // Clear mocks between tests
   clearMocks: true,
 
-  // Increase timeouts for Git integration tests (slow cloning + file I/O)
-  testTimeout: 10000,  // 10s for tests (default is 5s)
-  hookTimeout: 30000,  // 30s for beforeAll/afterAll hooks
+  // Increase timeouts for Git integration tests (slow cloning + file I/O).
+  // 3x on Windows -- see comment above.
+  testTimeout: isWindows ? 30000 : 10000,
+  hookTimeout: isWindows ? 60000 : 30000,
 
   // WHY retry: 2: several tests depend on fire-and-forget filesystem operations
   // (writeExecutionStats, lock file writes) that can lose races under load when
