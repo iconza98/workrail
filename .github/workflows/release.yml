@@ -49,15 +49,21 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'
-    
+
     permissions:
       contents: write
       actions: read
-      id-token: write
       issues: write
-    
+      # Required to publish @pdq/workrail to GitHub Packages.
+      packages: write
+
     steps:
+      # TODO(pdq): upstream uses a GitHub App token to bypass branch protection
+      # when pushing the version-bump commit / PR. Decide whether PDQ needs the
+      # same machinery or whether admin-merge by hand is fine. If you skip the
+      # app, you can also drop the "Open version-bump PR" step further down.
       - name: Generate GitHub App token
+        if: ${{ vars.WORKRAIL_USE_RELEASE_APP == 'true' }}
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
@@ -66,27 +72,31 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: workrail
 
+      - name: Resolve checkout token
+        id: token
+        run: |
+          if [ -n "${{ steps.app-token.outputs.token }}" ]; then
+            echo "value=${{ steps.app-token.outputs.token }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ secrets.GITHUB_TOKEN }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: refs/heads/main
           fetch-depth: 0
           persist-credentials: true
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.token.outputs.value }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.14.0
           cache: 'npm'
-          # Align with npm trusted publishing reference setup
-          registry-url: https://registry.npmjs.org
-
-      # npm Trusted Publishing (OIDC) requires npm >= 11.5.1.
-      # corepack reads the packageManager field from package.json and activates
-      # the correct npm version, reliably shadowing the bundled npm in PATH.
-      - name: Activate npm (corepack reads packageManager from package.json)
-        run: corepack enable npm && corepack prepare --activate
+          # Publish target: GitHub Packages, under the @pdq scope.
+          registry-url: https://npm.pkg.github.com
+          scope: '@pdq'
 
       - name: Install dependencies
         run: npm install --ignore-scripts
@@ -121,28 +131,26 @@ jobs:
 
       - name: Release
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # semantic-release uses GITHUB_TOKEN for the @semantic-release/github
+          # plugin (release notes, GitHub Releases). NODE_AUTH_TOKEN is what
+          # @semantic-release/npm reads to authenticate to GitHub Packages.
+          GITHUB_TOKEN: ${{ steps.token.outputs.value }}
+          GH_TOKEN: ${{ steps.token.outputs.value }}
+          NODE_AUTH_TOKEN: ${{ steps.token.outputs.value }}
           WORKRAIL_ALLOW_MAJOR_RELEASE: ${{ vars.WORKRAIL_ALLOW_MAJOR_RELEASE }}
         run: |
           set -euo pipefail
 
-          # Configure git remote to use the app token for push authentication.
-          # @semantic-release/git pushes using the remote URL; setting it here ensures
-          # the app token (which has bypass permission) is used, not GITHUB_TOKEN.
+          # Make the configured remote use the same token used for the checkout
+          # so @semantic-release/git can push the version bump back to main.
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
 
-          # Ensure we use the corepack-activated npm (OIDC requires npm >= 11.5.1).
-          # npx prepends ./node_modules/.bin to PATH, which can shadow the corepack
-          # shim with a bundled npm package version that does not support trusted publishing.
-          export PATH="$(echo "$PATH" | tr ':' '\n' | awk '!/\/node_modules\/\.bin/' | paste -sd ':' -)"
-          hash -r
-
-          # Avoid npx so PATH is not implicitly modified.
           node ./node_modules/semantic-release/bin/semantic-release.js
 
       - name: Open version-bump PR
-        if: success()
+        # Requires the release app token because the PR has to bypass branch
+        # protection on main. Skip when the app is not configured.
+        if: success() && vars.WORKRAIL_USE_RELEASE_APP == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -207,9 +215,9 @@ jobs:
 
           VERSION="${POST_TAG#v}"
 
-          # If npm already has this version, keep the tag (avoid flip-flopping).
-          if npm view "@exaudeus/workrail@${VERSION}" version >/dev/null 2>&1; then
-            echo "Version ${VERSION} exists on npm; keeping tag ${POST_TAG}"
+          # If the registry already has this version, keep the tag (avoid flip-flopping).
+          if npm view "@pdq/workrail@${VERSION}" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "Version ${VERSION} exists on GitHub Packages; keeping tag ${POST_TAG}"
             echo "RELEASE_TAG_CLEANUP_STATUS=kept_published" >> "$GITHUB_ENV"
             echo "RELEASE_TAG_CLEANUP_TAG=${POST_TAG}" >> "$GITHUB_ENV"
             exit 0

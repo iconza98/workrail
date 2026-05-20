@@ -722,11 +722,11 @@ describe('filterRememberedRootsForWorkspace', () => {
 describe('discoverRootedWorkflowDirectories -- workrail package dir guard', () => {
   afterEach(() => clearWalkCacheForTesting());
 
-  function makeWorkrailCheckout(dir: string): void {
+  function makeWorkrailCheckout(dir: string, name = '@pdq/workrail'): void {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'package.json'),
-      JSON.stringify({ name: '@exaudeus/workrail', version: '1.0.0' }),
+      JSON.stringify({ name, version: '1.0.0' }),
       'utf8',
     );
     // Add a workflows/ dir with a wr.* ID to simulate the real problem
@@ -758,7 +758,7 @@ describe('discoverRootedWorkflowDirectories -- workrail package dir guard', () =
       // broad-root/
       //   projects/
       //     workrail/   <-- workrail checkout, should be skipped
-      //       package.json  (name: @exaudeus/workrail)
+      //       package.json  (name: @pdq/workrail)
       //       workflows/wr.coding-task.json
       //     other-project/
       //       .workrail/workflows/  <-- should still be discovered
@@ -776,6 +776,19 @@ describe('discoverRootedWorkflowDirectories -- workrail package dir guard', () =
       expect(discovered).toContain(path.resolve(otherWorkflowsDir));
     } finally {
       fs.rmSync(broadRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('also skips checkouts named with the upstream @exaudeus scope', async () => {
+    // A PDQ engineer may have an upstream WorkRail checkout on disk for
+    // reference. The guard accepts both scopes so either checkout is skipped.
+    const upstreamCheckout = fs.mkdtempSync(path.join(os.tmpdir(), 'wr-pkg-upstream-'));
+    try {
+      makeWorkrailCheckout(upstreamCheckout, '@exaudeus/workrail');
+      const { discovered } = await discoverRootedWorkflowDirectories([upstreamCheckout]);
+      expect(discovered).toHaveLength(0);
+    } finally {
+      fs.rmSync(upstreamCheckout, { recursive: true, force: true });
     }
   });
 
