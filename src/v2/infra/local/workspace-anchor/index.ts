@@ -5,12 +5,12 @@ import type {
   WorkspaceAnchor,
   WorkspaceAnchorError,
 } from '../../../ports/workspace-anchor.port.js';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { createHash } from 'crypto';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * Local workspace anchor adapter.
@@ -67,7 +67,10 @@ export class LocalWorkspaceAnchorV2 implements WorkspaceContextResolverPortV2 {
     // This is used solely to compute repo_root_hash for resume ranking
     // (sameWorkspaceOnly filtering). The human-readable repo_root path is not
     // recorded -- it was unreliable as a session identity signal.
-    const gitCommonDir = await this.gitCommand('git rev-parse --path-format=absolute --git-common-dir', cwd);
+    const gitCommonDir = await this.gitCommand(
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      cwd,
+    );
     if (!gitCommonDir) return anchors;
     const repoRoot = gitCommonDir.replace(/\/\.git\/?$/, '').trim() || null;
     if (!repoRoot) return anchors;
@@ -83,8 +86,8 @@ export class LocalWorkspaceAnchorV2 implements WorkspaceContextResolverPortV2 {
 
     // git branch and git HEAD sha are independent of each other -- run in parallel.
     const [branch, sha] = await Promise.all([
-      this.gitCommand('git rev-parse --abbrev-ref HEAD', cwd),
-      this.gitCommand('git rev-parse HEAD', cwd),
+      this.gitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], cwd),
+      this.gitCommand(['rev-parse', 'HEAD'], cwd),
     ]);
 
 
@@ -99,9 +102,18 @@ export class LocalWorkspaceAnchorV2 implements WorkspaceContextResolverPortV2 {
     return anchors;
   }
 
-  private async gitCommand(cmd: string, cwd: string): Promise<string | null> {
+  /**
+   * Run `git <...args>` in cwd without invoking a shell.
+   *
+   * Uses execFile rather than exec so there is no `/bin/sh -c` round-trip:
+   * arguments are passed to git directly with no glob expansion or word
+   * splitting, and a future change that adds string interpolation to the
+   * command cannot accidentally introduce shell injection. Defense in depth;
+   * today's call sites all pass literal git flags.
+   */
+  private async gitCommand(args: readonly string[], cwd: string): Promise<string | null> {
     try {
-      const { stdout } = await execAsync(cmd, {
+      const { stdout } = await execFileAsync('git', [...args], {
         cwd,
         timeout: 5_000,
         encoding: 'utf8',
