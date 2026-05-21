@@ -1,9 +1,9 @@
-// semantic-release configuration for the PDQ-internal fork.
+// semantic-release configuration for this personal fork.
 //
-// Publishes @pdq/workrail to GitHub Packages on every merge to main that
-// includes a feat / fix / perf / revert commit. The registry, scope, and
-// access level come from `publishConfig` in package.json so this file does
-// not have to know about them.
+// Publishes @ikani.samani/workrail to the public npm registry on every merge
+// to main that includes a feat / fix / perf / revert commit. The registry,
+// scope, and access level come from `publishConfig` in package.json so this
+// file does not have to know about them.
 //
 // Repository URL is inferred from package.json. Do NOT hardcode it here --
 // merging from upstream is easier when this file does not diverge.
@@ -68,8 +68,8 @@ module.exports = {
       "@semantic-release/npm",
       {
         // tarballDir + npmPublish=true: the npm plugin reads publishConfig
-        // from package.json, so the GitHub Packages registry and "restricted"
-        // access are honoured automatically.
+        // from package.json, so the public registry and access=public are
+        // honoured automatically.
         npmPublish: true
       }
     ],

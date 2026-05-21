@@ -1,7 +1,7 @@
-# Developing on the PDQ fork
+# Developing on the fork
 
-This guide is for PDQ engineers contributing changes to the fork (bug fixes,
-new bundled workflows, internal hardening, upstream merges). If you only
+This guide is for developers contributing changes to the fork (bug fixes,
+new bundled workflows, hardening, upstream merges). If you only
 want to use WorkRail, stop here and read the [README](../README.md).
 
 For project-wide rules on branches, commits, and the planning workflow, read
@@ -97,25 +97,26 @@ npm run validate:authoring-docs     # regenerates docs/authoring.md from spec
 
 The fork tracks `EtienneBBeaulac/workrail`. We rebase or merge upstream
 periodically. A few files diverge by design and will produce conflicts
-every merge. Resolve in PDQ's favour for these:
+every merge. Resolve in this fork's favour for these:
 
 - `package.json` -- `name`, `repository`, `bugs`, `homepage`, `publishConfig`.
-- `.releaserc.cjs` -- the PDQ version drops the upstream `repositoryUrl`
-  and uses `@semantic-release/npm` instead of `exec`.
+- `.releaserc.cjs` -- this fork uses `@semantic-release/npm` instead of `exec`
+  and drops the upstream `repositoryUrl`.
 - `.github/workflows/release.yml` -- registry, scope, permissions, token
   flow. Upstream's GitHub-App-token machinery is gated behind
   `WORKRAIL_USE_RELEASE_APP`.
-- `README.md` -- PDQ-focused content.
-- `docs/development.md`, `docs/security.md`, `.npmrc.example` -- PDQ-only
-  files that should not exist upstream.
+- `README.md` -- fork-specific content.
+- `docs/development.md`, `docs/security.md` -- fork-only files that should
+  not exist upstream.
 
 When upstream renames things in `package.json` or restructures release
-config, do not auto-accept their version. Re-derive the PDQ shape.
+config, do not auto-accept their version. Re-derive the fork's shape.
 
 ## Branch and commit conventions
 
-- Branch naming: `pdq/<short-name>` for PDQ-internal work. Upstream uses
-  `feature/etienneb/<name>`; do not copy that for PDQ branches.
+- Branch naming: use a short descriptive name (e.g. `fix/session-timeout`,
+  `feat/loop-support`). Upstream uses `feature/etienneb/<name>`; this fork
+  uses no fixed prefix convention.
 - Commits follow `<type>(<scope>): <subject>` per `AGENTS.md`. The
   commit-msg hook in `.git-hooks/commit-msg` always blocks the first
   commit attempt and prints a five-point quality checklist. After you
@@ -133,9 +134,10 @@ Releases are automated by semantic-release on merge to `main`:
 | `docs`, `chore`, `refactor`, `test`, `build`, `ci`, `style` | no release |
 | Breaking change | minor (default) or major (`WORKRAIL_ALLOW_MAJOR_RELEASE=true`) |
 
-The release job needs `packages: write` on `GITHUB_TOKEN` to publish to
-GitHub Packages. The token is auto-provided when the workflow runs in the
-PDQ org. The `WORKRAIL_USE_RELEASE_APP` repo variable controls whether the
+The release job publishes to the public npm registry. It reads
+`NODE_AUTH_TOKEN` from the `NPM_TOKEN` repo secret -- add an Automation-type
+token from npmjs.org to the repo secrets before the first release. The
+`WORKRAIL_USE_RELEASE_APP` repo variable controls whether the
 upstream-style GitHub-App push flow is also wired up; leave it unset to
 admin-merge version bumps by hand.
 
@@ -148,6 +150,6 @@ Background:
 Pulling local changes into Claude Code: if you are using the HTTP dev loop,
 the watch + dev:mcp:watch terminals do this automatically (recompile,
 restart, ~5-10 second cycle). For a binary you have installed via
-`npm install -g @pdq/workrail`, you need to rebuild and re-pack to test the
-published shape -- usually not worth doing locally; rely on CI for the
-release shape.
+`npm install -g @ikani.samani/workrail`, you need to rebuild and re-pack to
+test the published shape -- usually not worth doing locally; rely on CI for
+the release shape.
