@@ -54,6 +54,9 @@ jobs:
       contents: write
       actions: read
       issues: write
+      # Required for npm trusted publishing (OIDC). Without this GitHub never
+      # mints an id-token and @semantic-release/npm falls back to NODE_AUTH_TOKEN.
+      id-token: write
 
     steps:
       # TODO(pdq): upstream uses a GitHub App token to bypass branch protection
@@ -96,6 +99,13 @@ jobs:
           registry-url: https://registry.npmjs.org
           scope: '@ikani.samani'
 
+      # Node 22.14.0 ships npm 10.9.2. Trusted publishing needs npm >= 11.5.1,
+      # so the bundled version cannot negotiate the OIDC token exchange.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Install dependencies
         run: npm install --ignore-scripts
 
@@ -116,23 +126,32 @@ jobs:
           echo "PRE_RELEASE_TAG=$PRE_TAG" >> "$GITHUB_ENV"
 
       - name: Restore bin execute bit (upload-artifact strips file permissions)
-        run: node -e "require('fs').chmodSync('dist/mcp-server.js',0o755)"
+        run: |
+          node -e "require('fs').chmodSync('dist/mcp-server.js',0o755)"
+          node -e "require('fs').chmodSync('dist/cli-workrail.js',0o755)"
 
       - name: Verify build artifacts
         run: |
           echo "Checking build artifacts..."
           ls -la dist/
           test -f dist/mcp-server.js || (echo "Missing dist/mcp-server.js" && exit 1)
+          test -f dist/cli-workrail.js || (echo "Missing dist/cli-workrail.js" && exit 1)
           test -f dist/cli.js || (echo "Missing dist/cli.js" && exit 1)
           test -x dist/mcp-server.js || (echo "dist/mcp-server.js is not executable after chmod -- publish aborted" && exit 1)
+          test -x dist/cli-workrail.js || (echo "dist/cli-workrail.js is not executable after chmod -- publish aborted" && exit 1)
           echo "Build artifacts verified."
 
       - name: Release
         env:
           # semantic-release uses GITHUB_TOKEN for the @semantic-release/github
-          # plugin (release notes, GitHub Releases). NODE_AUTH_TOKEN is what
-          # @semantic-release/npm reads to authenticate to the npm registry.
-          # Add NPM_TOKEN to the repo secrets before the first release.
+          # plugin (release notes, GitHub Releases).
+          #
+          # npm auth: the npm CLI detects the OIDC environment first and uses
+          # trusted publishing, falling back to NODE_AUTH_TOKEN only if that is
+          # unavailable. NPM_TOKEN is therefore optional -- leave it unset once
+          # trusted publishing is confirmed working, or set it as a fallback
+          # while migrating. An unset secret resolves to an empty string, which
+          # the CLI treats as absent.
           GITHUB_TOKEN: ${{ steps.token.outputs.value }}
           GH_TOKEN: ${{ steps.token.outputs.value }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

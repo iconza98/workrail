@@ -143,7 +143,7 @@ hot spots.
 
 ## Reporting issues
 
-File issues in the [`ikani-pdq/workrail`](https://github.com/ikani-pdq/workrail/issues)
+File issues in the [`iconza98/workrail`](https://github.com/iconza98/workrail/issues)
 repository. Do not file bugs against upstream for issues that are specific to
 this fork.
 
