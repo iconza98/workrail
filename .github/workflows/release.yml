@@ -21,12 +21,22 @@ jobs:
       issues: write
     steps:
       - name: Open issue for CI failure blocking release
+        # Best-effort notifier: never let it fail the job. It reports a problem,
+        # it is not itself part of shipping a release.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
           CI_SHA: ${{ github.event.workflow_run.head_sha }}
           REPO: ${{ github.repository }}
         run: |
+          # Issues are disabled on this fork; gh exits non-zero on every call
+          # below when that is the case. Check once and no-op cleanly.
+          if [ "$(gh api "repos/${REPO}" --jq '.has_issues')" != "true" ]; then
+            echo "Issues are disabled on ${REPO} -- skipping notification."
+            exit 0
+          fi
+
           SHORT_SHA="${CI_SHA:0:7}"
           TITLE="CI failure on main blocking release (${SHORT_SHA})"
 
@@ -90,6 +100,16 @@ jobs:
           persist-credentials: true
           token: ${{ steps.token.outputs.value }}
 
+      # Must run immediately after checkout, before any step that can fail.
+      # The "Cleanup tag on failed publish" step compares against this value to
+      # decide whether this run created a tag; if an earlier step fails before
+      # PRE_RELEASE_TAG is set, cleanup sees an empty baseline and mistakes the
+      # pre-existing tag for one this run created.
+      - name: Capture pre-release tag
+        run: |
+          PRE_TAG="$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || true)"
+          echo "PRE_RELEASE_TAG=$PRE_TAG" >> "$GITHUB_ENV"
+
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -124,11 +144,6 @@ jobs:
 
       - name: Verify dist manifest
         run: node scripts/dist-manifest.js --dist dist --verify dist/manifest.json
-
-      - name: Capture pre-release tag
-        run: |
-          PRE_TAG="$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || true)"
-          echo "PRE_RELEASE_TAG=$PRE_TAG" >> "$GITHUB_ENV"
 
       - name: Restore bin execute bit (upload-artifact strips file permissions)
         run: |
@@ -232,8 +247,14 @@ jobs:
 
           TAG_SHA="$(git rev-list -n 1 "${POST_TAG}")"
           if [ "${TAG_SHA}" != "${CI_SHA}" ]; then
+            # Not a tag this run created -- leaving it alone is the correct and
+            # safe outcome, so report it and succeed. Failing here would stack a
+            # second, misleading error on top of the real failure that triggered
+            # cleanup, and would mask it in the run summary.
             echo "Refusing to delete ${POST_TAG}: tag sha ${TAG_SHA} != run sha ${CI_SHA}"
-            exit 1
+            echo "RELEASE_TAG_CLEANUP_STATUS=skipped_sha_mismatch" >> "$GITHUB_ENV"
+            echo "RELEASE_TAG_CLEANUP_TAG=${POST_TAG}" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           VERSION="${POST_TAG#v}"
@@ -257,12 +278,23 @@ jobs:
 
       - name: Open issue on release failure
         if: failure()
+        # Best-effort notifier: never let it fail the job. This step only runs
+        # when something has already gone wrong, and a failure here replaces the
+        # real error in the run summary with a useless one.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
           CI_SHA: ${{ github.event.workflow_run.head_sha }}
           REPO: ${{ github.repository }}
         run: |
+          # Issues are disabled on this fork; gh exits non-zero on every call
+          # below when that is the case. Check once and no-op cleanly.
+          if [ "$(gh api "repos/${REPO}" --jq '.has_issues')" != "true" ]; then
+            echo "Issues are disabled on ${REPO} -- skipping notification."
+            exit 0
+          fi
+
           SHORT_SHA="${CI_SHA:0:7}"
           TITLE="Release failed for ${SHORT_SHA}"
 
@@ -304,6 +336,9 @@ jobs:
             elif [ "${RELEASE_TAG_CLEANUP_STATUS:-}" = "kept_published" ]; then
               OUTCOME_LINE="Failed (kept ${RELEASE_TAG_CLEANUP_TAG}; version already on npm)"
               echo "::error title=Release outcome::Failed; kept ${RELEASE_TAG_CLEANUP_TAG} (version already on npm)"
+            elif [ "${RELEASE_TAG_CLEANUP_STATUS:-}" = "skipped_sha_mismatch" ]; then
+              OUTCOME_LINE="Failed (no tag created by this run; left ${RELEASE_TAG_CLEANUP_TAG} in place)"
+              echo "::error title=Release outcome::Failed before tagging; left ${RELEASE_TAG_CLEANUP_TAG} in place"
             else
               OUTCOME_LINE="Failed"
               echo "::error title=Release outcome::Failed"

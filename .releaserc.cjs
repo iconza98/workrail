@@ -73,6 +73,25 @@ module.exports = {
         npmPublish: true
       }
     ],
-    "@semantic-release/github"
+    [
+      "@semantic-release/github",
+      {
+        // Publish the GitHub Release, but do not touch issues or pull requests.
+        //
+        // The plugin's "success" step resolves every released commit back to an
+        // associated PR so it can comment on it. Commits adopted from upstream
+        // carry "(#1234)" references to PRs in EtienneBBeaulac/workrail, which
+        // do not exist here, so that lookup 404s and fails the whole run --
+        // after npm has already published. See
+        // node_modules/@semantic-release/github/lib/success.js:122.
+        //
+        // Issues are also disabled on this fork, so every issue-writing path in
+        // this plugin would fail regardless of the upstream PR references.
+        successCommentCondition: false,
+        failComment: false,
+        failTitle: false,
+        releasedLabels: false
+      }
+    ]
   ]
 };
