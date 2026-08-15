@@ -12,6 +12,34 @@ Do not:
 - create release tags locally
 - treat local tags as the source of truth for published versions
 
+### The committed `version` field is a sentinel
+
+`package.json` in git reads `0.0.0-development`. That is deliberate and must
+stay that way.
+
+The committed value is not the published version and never was.
+`@semantic-release/npm` writes the real version during its `prepare` step,
+immediately before publishing, so the tarball on npm always carries the correct
+semver. Nothing reads the committed value during a release: the next version is
+computed from the highest git tag reachable from `main`.
+
+Before this change the field held a real-looking number, and because nothing
+ever commits the released version back to `main`, it drifted. At one point the
+repository read `3.121.0` while npm's latest was `3.102.0`, and the gap would
+have widened with every release. A number that looks authoritative but is not
+is worse than an obvious placeholder.
+
+Consequences worth knowing:
+
+- `workrail --version` from a git checkout reports `0.0.0-development`. From an
+  installed package it reports the real version, because the published
+  `package.json` carries it.
+- Do not "fix" the sentinel by writing a real version into it. That reintroduces
+  the drift and is what the first rule above prohibits.
+- `scripts/ci-policy-check.js` enforces that `@semantic-release/npm` stays in
+  the plugin list. If it were removed, nothing would write the version and the
+  sentinel itself would be published.
+
 ### Narrow exception: repairing a detached release line
 
 The no-local-tags rule governs **routine releases**. There is one situation it

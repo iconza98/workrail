@@ -138,8 +138,11 @@ The release job publishes to the public npm registry. It reads
 `NODE_AUTH_TOKEN` from the `NPM_TOKEN` repo secret -- add an Automation-type
 token from npmjs.org to the repo secrets before the first release. The
 `WORKRAIL_USE_RELEASE_APP` repo variable controls whether the
-upstream-style GitHub-App push flow is also wired up; leave it unset to
-admin-merge version bumps by hand.
+upstream-style GitHub-App push flow is also wired up. Leave it unset. There
+are no version bumps to merge back: the committed `package.json` version is
+the sentinel `0.0.0-development`, and the real version is written by
+`@semantic-release/npm` at publish time. The App-gated "Open version-bump PR"
+step in `release.yml` is dormant by design and documented as such in place.
 
 Background:
 - Release policy: [`docs/reference/releases.md`](reference/releases.md).
