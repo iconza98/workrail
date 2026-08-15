@@ -11,7 +11,7 @@ of truth for how work moves through this repo.
 ## Clone and bootstrap
 
 ```
-git clone git@github.com:ikani-pdq/workrail.git
+git clone git@github.com:iconza98/workrail.git
 cd workrail
 ./scripts/setup-hooks.sh   # activates the commit-msg quality gate
 npm install                # uses corepack-pinned npm (see packageManager)

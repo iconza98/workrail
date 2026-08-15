@@ -176,6 +176,6 @@ new directories with `0o700` directly.
 
 ## Reporting a security issue
 
-Open a GitHub issue at [`ikani-pdq/workrail`](https://github.com/ikani-pdq/workrail/issues),
+Open a GitHub issue at [`iconza98/workrail`](https://github.com/iconza98/workrail/issues),
 or contact the maintainer privately if the issue is sensitive. Do not include
 session manifests or keyring contents in any report.

@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ikani-pdq/workrail.git"
+    "url": "git+https://github.com/iconza98/workrail.git"
   },
   "bugs": {
-    "url": "https://github.com/ikani-pdq/workrail/issues"
+    "url": "https://github.com/iconza98/workrail/issues"
   },
-  "homepage": "https://github.com/ikani-pdq/workrail#readme",
+  "homepage": "https://github.com/iconza98/workrail#readme",
   "publishConfig": {
     "access": "public"
   },
