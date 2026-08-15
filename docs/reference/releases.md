@@ -12,6 +12,35 @@ Do not:
 - create release tags locally
 - treat local tags as the source of truth for published versions
 
+### Narrow exception: repairing a detached release line
+
+The no-local-tags rule governs **routine releases**. There is one situation it
+does not cover.
+
+If a sync from upstream is flattened rather than merged, upstream's commits stop
+being ancestors of `main`, and so do upstream's tags. semantic-release then
+computes the next version from the fork's own last tag, which can be far behind
+the code that was just adopted. The result is a published version number that
+understates its contents, and no amount of correct future behavior fixes it,
+because the tag that would anchor the line does not exist anywhere reachable.
+
+Creating a tag by hand is permitted **solely** to repair that state, subject to
+all of the following:
+
+- the tag points at a commit on `main`, never at an upstream commit
+- upstream's own tags are still not pushed to `origin` (see AGENTS.md)
+- the repair is recorded in the PR that accompanies it, so the tag is not later
+  mistaken for one semantic-release produced
+
+Worked example: `v3.121.0` was created by hand on `18ca0ba8` after the 3.121.0
+adoption was flattened to a single parent. Upstream's own `v3.121.0` points at
+`aad3e115`, which is unreachable from `main`, and was deliberately **not**
+pushed. Without the repair, semantic-release would have continued numbering from
+`v3.101.1` while shipping upstream 3.121.0's code.
+
+This exception is narrow on purpose. It is not a licence to tag releases by
+hand; it is a licence to put the release line back where automation can resume.
+
 ## Release classification
 
 WorkRail uses conventional commits through `semantic-release`, but the governing principle is

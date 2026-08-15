@@ -455,6 +455,36 @@ The GitHub "Sync fork" button is not equivalent -- this repo's GitHub fork paren
 is an intermediate fork, not the true upstream, so the button pulls from a repo
 that is itself stale. Always sync through the `upstream` remote.
 
+### `gh` reports on upstream unless you tell it otherwise
+
+Because both `origin` and `upstream` are configured, `gh` cannot infer which one
+you mean. With no default set it resolves to **`upstream`**, so these all
+silently report on `EtienneBBeaulac/workrail` rather than on this fork:
+
+```bash
+gh run list          # upstream's CI runs
+gh pr list           # upstream's PRs
+gh api repos/:owner/:repo
+```
+
+The symptom is disorienting rather than obviously wrong: pushes to `main`
+appear to trigger no CI at all, because you are reading a repository those
+commits were never pushed to. Diagnosis goes looking for a broken trigger that
+was never broken.
+
+Set the default once per clone:
+
+```bash
+gh repo set-default iconza98/workrail
+gh repo set-default --view      # confirm
+```
+
+In scripts and automation, pass `-R` explicitly rather than relying on the
+default. It is stored as `remote.origin.gh-resolved` in `.git/config`, which
+means it is per-clone: a CI runner, a container, or anyone's fresh clone starts
+without it and silently reads upstream again. (It *is* shared with `git
+worktree` checkouts, which use the same config file.)
+
 ### Never squash-merge a sync PR
 
 Squash-merging discards the merge commit's second parent. Upstream's commits then
