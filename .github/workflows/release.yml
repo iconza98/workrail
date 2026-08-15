@@ -54,6 +54,9 @@ jobs:
       contents: write
       actions: read
       issues: write
+      # Required for npm trusted publishing (OIDC). Without this GitHub never
+      # mints an id-token and @semantic-release/npm falls back to NODE_AUTH_TOKEN.
+      id-token: write
 
     steps:
       # TODO(pdq): upstream uses a GitHub App token to bypass branch protection
@@ -96,6 +99,13 @@ jobs:
           registry-url: https://registry.npmjs.org
           scope: '@ikani.samani'
 
+      # Node 22.14.0 ships npm 10.9.2. Trusted publishing needs npm >= 11.5.1,
+      # so the bundled version cannot negotiate the OIDC token exchange.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Install dependencies
         run: npm install --ignore-scripts
 
@@ -134,9 +144,14 @@ jobs:
       - name: Release
         env:
           # semantic-release uses GITHUB_TOKEN for the @semantic-release/github
-          # plugin (release notes, GitHub Releases). NODE_AUTH_TOKEN is what
-          # @semantic-release/npm reads to authenticate to the npm registry.
-          # Add NPM_TOKEN to the repo secrets before the first release.
+          # plugin (release notes, GitHub Releases).
+          #
+          # npm auth: the npm CLI detects the OIDC environment first and uses
+          # trusted publishing, falling back to NODE_AUTH_TOKEN only if that is
+          # unavailable. NPM_TOKEN is therefore optional -- leave it unset once
+          # trusted publishing is confirmed working, or set it as a fallback
+          # while migrating. An unset secret resolves to an empty string, which
+          # the CLI treats as absent.
           GITHUB_TOKEN: ${{ steps.token.outputs.value }}
           GH_TOKEN: ${{ steps.token.outputs.value }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
