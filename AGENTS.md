@@ -439,6 +439,68 @@ When the project owner asks you to create a PR or merge:
 - Merge with `gh pr merge --squash --delete-branch`
 - Do not push or merge unless explicitly asked. Do not assume finishing a feature means "create a PR."
 
+**Exception: PRs that merge upstream history are never squashed.** See below.
+
+## Syncing from upstream
+
+This repository is a fork. `origin` is the fork; the true upstream is a separate
+remote:
+
+```bash
+git remote add upstream https://github.com/EtienneBBeaulac/workrail.git
+git fetch upstream
+```
+
+The GitHub "Sync fork" button is not equivalent -- this repo's GitHub fork parent
+is an intermediate fork, not the true upstream, so the button pulls from a repo
+that is itself stale. Always sync through the `upstream` remote.
+
+### Never squash-merge a sync PR
+
+Squash-merging discards the merge commit's second parent. Upstream's commits then
+stop being ancestors of `main`, and so do every one of upstream's tags. The
+consequence is not cosmetic: semantic-release derives the last released version
+from the highest tag *reachable from the release branch*. After a squash, that is
+the fork's own last release, not the upstream version just adopted.
+
+Merge sync PRs with a merge commit instead:
+
+```bash
+gh pr merge <n> --merge --delete-branch
+```
+
+Everything else in this repo is still squash-merged. This exception exists only
+because squashing destroys the ancestry that makes upstream history meaningful.
+
+### Do not push upstream tags to `origin`
+
+Upstream tags point at upstream commits. If those commits are not ancestors of
+`main`, the tags are unreachable refs that still occupy their names -- and
+semantic-release will eventually compute a version whose tag name is already
+taken, failing with `fatal: tag 'vX.Y.Z' already exists` after it has already
+written `package.json` and, depending on timing, published.
+
+If upstream tags are needed locally for reference, fetch them under a namespace
+that cannot collide with the fork's own release tags:
+
+```bash
+git fetch upstream 'refs/tags/*:refs/tags/upstream-*'
+```
+
+Fork release tags remain `vX.Y.Z` and are created only by semantic-release.
+
+### Conflict resolution during a sync
+
+- Resolve in favor of upstream unless the fork changed the file deliberately.
+  Check with `git diff $(git merge-base HEAD upstream/main) HEAD -- <file>`; an
+  empty diff means the fork never touched it and upstream's version wins.
+- Watch for upstream relocating a module the fork has patched. Taking upstream's
+  version of a file that became a re-export shim silently reverts the fork's
+  change with no conflict to signal it. Re-apply the change at the new path and
+  confirm the covering test still exercises it.
+- After resolving, run `npx vitest run` against both merge parents before
+  attributing any failure to the merge.
+
 ## Coding philosophy
 
 These principles guide all code decisions in this project. When writing, reviewing, or analyzing code, justify structural choices against them. When multiple principles conflict, surface the tension explicitly.
