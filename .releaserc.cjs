@@ -57,19 +57,22 @@ module.exports = {
       }
     ],
     [
-      "@semantic-release/exec",
-      {
-        // semantic-release/npm reads the version from package.json, so we
-        // still need to write it before publishing.
-        prepareCmd: "npm pkg set version=${nextRelease.version}"
-      }
-    ],
-    [
       "@semantic-release/npm",
       {
-        // tarballDir + npmPublish=true: the npm plugin reads publishConfig
-        // from package.json, so the public registry and access=public are
-        // honoured automatically.
+        // Sole writer of the release version. Its prepare step runs
+        // `npm version <next>` unconditionally, before publish, so nothing
+        // else needs to write the field -- an @semantic-release/exec
+        // prepareCmd doing `npm pkg set version=...` used to sit here and was
+        // pure duplication. docs/development.md already documented that this
+        // fork uses @semantic-release/npm *instead of* exec; the exec entry
+        // was upstream residue that contradicted it.
+        //
+        // scripts/ci-policy-check.js enforces both halves of this: that no
+        // exec prepareCmd writes a version again, and that this plugin stays
+        // present. Do not remove it without removing those checks first.
+        //
+        // npmPublish=true: the plugin reads publishConfig from package.json,
+        // so the public registry and access=public are honoured automatically.
         npmPublish: true
       }
     ],

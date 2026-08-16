@@ -179,15 +179,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Make the configured remote use the same token used for the checkout
-          # so @semantic-release/git can push the version bump back to main.
+          # Re-point the remote at the checkout token so semantic-release can
+          # push the release tag. It does NOT push a version-bump commit:
+          # @semantic-release/git is not in the .releaserc.cjs plugin list, and
+          # the committed package.json version is deliberately not kept in step
+          # with the published one. The comment previously here claimed
+          # otherwise and described a plugin that was never configured.
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
 
           node ./node_modules/semantic-release/bin/semantic-release.js
 
       - name: Open version-bump PR
-        # Requires the release app token because the PR has to bypass branch
-        # protection on main. Skip when the app is not configured.
+        # DORMANT BY DESIGN -- this step has never executed in this fork.
+        #
+        # It is gated on WORKRAIL_USE_RELEASE_APP, which is unset, and
+        # docs/development.md records leaving it unset as a deliberate choice.
+        # Its stated rationale (bypassing branch protection) does not even
+        # apply here, because main is not a protected branch.
+        #
+        # Retained rather than deleted for one reason: deleting upstream's
+        # GitHub-App machinery widens the diff this fork has to re-derive on
+        # every sync, and docs/development.md:100-113 lists this file as one
+        # that diverges by design. Keeping a dormant step costs less than
+        # re-resolving its absence at each merge.
+        #
+        # If you are debugging a release, this step is not your problem: it
+        # cannot fire. Delete it only as a deliberate decision, not as a side
+        # effect of another change.
         if: success() && vars.WORKRAIL_USE_RELEASE_APP == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
